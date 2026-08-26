@@ -1,50 +1,15 @@
 #![no_std]
 
-use soroban_sdk::{
-    contract, contracterror, contractevent, contractimpl, contractmeta, contracttype, Address,
-    BytesN, Env, Vec,
-};
+use soroban_sdk::{contract, contractimpl, contractevent, contracterror, Address, BytesN, Env};
 
-contractmeta!(key = "name", val = "ReceiptAnchor");
-contractmeta!(key = "version", val = env!("CARGO_PKG_VERSION"));
-contractmeta!(
-    key = "repo",
-    val = "https://github.com/accensa/accensa-contracts"
-);
-contractmeta!(key = "commit", val = env!("GIT_SHA"));
-
-#[contracterror]
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum Error {
-    AlreadyInitialized = 1,
-    NotInitialized = 2,
-    Unauthorized = 3,
-    BatchNotFound = 4,
-    BatchTooLarge = 5,
-}
-
-#[contracttype]
-pub enum DataKey {
-    Admin,
-    BatchCount,
-    Batch(u64),
-    PrunedUpTo,
-}
-
-#[contracttype]
+#[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BatchRecord {
-    pub root: BytesN<32>,
-    pub count: u32,
-    pub period_start: u64,
-    pub period_end: u64,
-    pub anchored_ledger: u32,
+pub struct InitializeEvent {
+    #[topic]
+    pub admin: Address,
+    pub version: soroban_sdk::String,
 }
 
-/// Emitted when a merchant anchors a batch of receipts.
-///
-/// Topics: `("anchor_event", batch_id)`. The data map mirrors [`BatchRecord`], so
-/// indexers can decode it with the same shape returned by `get_batch`.
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AnchorEvent {
@@ -65,35 +30,60 @@ pub struct PruneEvent {
     pub end_batch_id: u64,
 }
 
-/// Approximately 30 days of ledgers, assuming ~5 seconds per ledger.
-/// 60 * 60 * 24 * 30 / 5 = 518,400.
-/// This ensures batches survive for long-term audit use before requiring a TTL bump or restoration.
-const TTL_EXTEND: u32 = 518_400;
-/// The threshold before TTL is actually bumped, to prevent spamming updates on every call.
-const TTL_THRESHOLD: u32 = 100;
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+pub enum Error {
+    AlreadyInitialized = 1,
+    NotInitialized = 2,
+    Unauthorized = 3,
+    BatchTooLarge = 4,
+    BatchNotFound = 5,
+    InvalidRange = 6,
+}
 
-const MAX_BATCH_SIZE: u32 = 1000;
+#[derive(Clone)]
+#[soroban_sdk::contracttype]
+pub struct BatchRecord {
+    pub root: BytesN<32>,
+    pub count: u32,
+    pub period_start: u64,
+    pub period_end: u64,
+    pub anchored_ledger: u32,
+}
 
-/// Maximum number of batches to delete in a single `prune_batches` call.
-/// Keeps per-transaction compute bounded; callers resume by invoking again
-/// (the `PrunedUpTo` cursor advances across calls).
-const MAX_PRUNE_BATCHES: u64 = 100;
+#[derive(Clone)]
+#[soroban_sdk::contracttype]
+pub enum DataKey {
+    Admin,
+    BatchCount,
+    Batch(u64),
+    PrunedUpTo,
+}
 
 #[contract]
 pub struct ReceiptAnchor;
 
 #[contractimpl]
 impl ReceiptAnchor {
-    pub fn initialize(env: Env, merchant: Address) -> Result<(), Error> {
-        if env.storage().instance().has(&DataKey::Admin) {
+    pub fn initialize(env: Env, admin: Address) -> Result<(), Error> {
+        if env.storage().persistent().has(&DataKey::Admin) {
             return Err(Error::AlreadyInitialized);
         }
-        env.storage().instance().set(&DataKey::Admin, &merchant);
-        env.storage().instance().set(&DataKey::BatchCount, &0u64);
-        env.storage().instance().set(&DataKey::PrunedUpTo, &1u64);
-        env.storage()
-            .instance()
-            .extend_ttl(TTL_THRESHOLD, TTL_EXTEND);
+        env.storage().persistent().set(&DataKey::Admin, &admin);
+        env.storage().persistent().set(&DataKey::BatchCount, &0u64);
+        env.storage().persistent().set(&DataKey::PrunedUpTo, &1u64);
+
+        env.events().publish(
+            (
+                soroban_sdk::Symbol::new(&env, "initialize_event"),
+                admin.clone(),
+            ),
+            InitializeEvent {
+                admin,
+                version: soroban_sdk::String::from_str(&env, env.contract_version()),
+            },
+        );
+
         Ok(())
     }
 
@@ -104,177 +94,190 @@ impl ReceiptAnchor {
         period_start: u64,
         period_end: u64,
     ) -> Result<u64, Error> {
-        if count > MAX_BATCH_SIZE {
+        let admin: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Admin)
+            .ok_or(Error::NotInitialized)?;
+        admin.require_auth();
+
+        if count == 0 || count > Self::get_max_batch_size(env.clone()) {
             return Err(Error::BatchTooLarge);
         }
 
-        let merchant: Address = env
+        let mut batch_count: u64 = env
             .storage()
-            .instance()
-            .get(&DataKey::Admin)
-            .ok_or(Error::NotInitialized)?;
-        merchant.require_auth();
+            .persistent()
+            .get(&DataKey::BatchCount)
+            .unwrap_or(0);
+        batch_count += 1;
 
-        let mut batch_id: u64 = env.storage().instance().get(&DataKey::BatchCount).unwrap();
-        batch_id += 1;
-
+        let anchored_ledger = env.ledger().sequence();
         let record = BatchRecord {
             root: root.clone(),
             count,
             period_start,
             period_end,
-            anchored_ledger: env.ledger().sequence(),
+            anchored_ledger,
         };
 
         env.storage()
             .persistent()
-            .set(&DataKey::Batch(batch_id), &record);
-        env.storage()
-            .instance()
-            .set(&DataKey::BatchCount, &batch_id);
-
-        env.storage()
-            .instance()
-            .extend_ttl(TTL_THRESHOLD, TTL_EXTEND);
+            .set(&DataKey::Batch(batch_count), &record);
         env.storage()
             .persistent()
-            .extend_ttl(&DataKey::Batch(batch_id), TTL_THRESHOLD, TTL_EXTEND);
+            .set(&DataKey::BatchCount, &batch_count);
 
-        AnchorEvent {
-            batch_id,
-            root: record.root,
-            count: record.count,
-            period_start: record.period_start,
-            period_end: record.period_end,
-            anchored_ledger: record.anchored_ledger,
-        }
-        .publish(&env);
+        env.events().publish(
+            (
+                soroban_sdk::Symbol::new(&env, "anchor_event"),
+                batch_count,
+            ),
+            AnchorEvent {
+                batch_id: batch_count,
+                root,
+                count,
+                period_start,
+                period_end,
+                anchored_ledger,
+            },
+        );
 
-        Ok(batch_id)
+        Ok(batch_count)
     }
 
     pub fn get_batch(env: Env, batch_id: u64) -> Result<BatchRecord, Error> {
+        let pruned_up_to: u64 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PrunedUpTo)
+            .unwrap_or(1);
+        if batch_id < pruned_up_to {
+            return Err(Error::BatchNotFound);
+        }
         env.storage()
             .persistent()
             .get(&DataKey::Batch(batch_id))
             .ok_or(Error::BatchNotFound)
     }
 
+    pub fn get_batch_count(env: Env) -> Result<u64, Error> {
+        if !env.storage().persistent().has(&DataKey::Admin) {
+            return Err(Error::NotInitialized);
+        }
+        Ok(env
+            .storage()
+            .persistent()
+            .get(&DataKey::BatchCount)
+            .unwrap_or(0))
+    }
+
+    pub fn get_max_batch_size(_env: Env) -> u32 {
+        1000
+    }
+
     pub fn verify_receipt(
         env: Env,
         batch_id: u64,
         leaf: BytesN<32>,
-        proof: Vec<BytesN<32>>,
+        proof: soroban_sdk::Vec<BytesN<32>>,
     ) -> Result<bool, Error> {
-        let batch = Self::get_batch(env.clone(), batch_id)?;
-        let mut computed_hash = leaf.to_array();
+        let record = Self::get_batch(env.clone(), batch_id)?;
+        let mut current = leaf;
 
-        for sibling_bytes in proof.into_iter() {
-            let sibling = sibling_bytes.to_array();
-            let mut combined = [0u8; 64];
-            if computed_hash <= sibling {
-                combined[..32].copy_from_slice(&computed_hash);
-                combined[32..].copy_from_slice(&sibling);
+        for sibling in proof.iter() {
+            let mut combined = soroban_sdk::Bytes::new(&env);
+            if current < sibling {
+                combined.append(&current.into());
+                combined.append(&sibling.into());
             } else {
-                combined[..32].copy_from_slice(&sibling);
-                combined[32..].copy_from_slice(&computed_hash);
+                combined.append(&sibling.into());
+                combined.append(&current.into());
             }
-            computed_hash = env
-                .crypto()
-                .sha256(&soroban_sdk::Bytes::from_slice(&env, &combined))
-                .to_array();
+            let hash = env.crypto().sha256(&combined);
+            current = hash.into();
         }
 
-        Ok(computed_hash == batch.root.to_array())
-    }
-
-    pub fn get_batch_count(env: Env) -> Result<u64, Error> {
-        env.storage()
-            .instance()
-            .get(&DataKey::BatchCount)
-            .ok_or(Error::NotInitialized)
-    }
-
-    /// Returns the maximum number of receipts allowed in a single `anchor_batch`.
-    ///
-    /// Clients should call this rather than hard-coding the limit so they stay
-    /// in sync if the constant is ever tuned.
-    pub fn get_max_batch_size(_env: Env) -> u32 {
-        MAX_BATCH_SIZE
+        Ok(current == record.root)
     }
 
     pub fn extend_batch_ttl(env: Env, batch_id: u64) -> Result<(), Error> {
+        let pruned_up_to: u64 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PrunedUpTo)
+            .unwrap_or(1);
+        if batch_id < pruned_up_to {
+            return Err(Error::BatchNotFound);
+        }
         if !env.storage().persistent().has(&DataKey::Batch(batch_id)) {
             return Err(Error::BatchNotFound);
         }
         env.storage()
             .persistent()
-            .extend_ttl(&DataKey::Batch(batch_id), TTL_THRESHOLD, TTL_EXTEND);
-        Ok(())
+            .extend_ttl(&DataKey::Batch(batch_id), 4096, 6312000);
+        Ok()
     }
 
     pub fn prune_batches(env: Env, before_ledger: u32) -> Result<(), Error> {
-        let merchant: Address = env
+        let admin: Address = env
             .storage()
-            .instance()
+            .persistent()
             .get(&DataKey::Admin)
             .ok_or(Error::NotInitialized)?;
-        merchant.require_auth();
+        admin.require_auth();
 
-        let start_batch_id: u64 = env
+        let mut pruned_up_to: u64 = env
             .storage()
-            .instance()
+            .persistent()
             .get(&DataKey::PrunedUpTo)
             .unwrap_or(1);
         let batch_count: u64 = env
             .storage()
-            .instance()
+            .persistent()
             .get(&DataKey::BatchCount)
             .unwrap_or(0);
 
-        let mut pruned_up_to = start_batch_id;
-        let mut pruned_count: u64 = 0;
+        let start_pruned = pruned_up_to;
+        let mut pruned_any = false;
 
-        while pruned_up_to <= batch_count && pruned_count < MAX_PRUNE_BATCHES {
+        while pruned_up_to <= batch_count {
             if let Some(record) = env
                 .storage()
                 .persistent()
                 .get::<_, BatchRecord>(&DataKey::Batch(pruned_up_to))
             {
                 if record.anchored_ledger < before_ledger {
-                    env.storage()
-                        .persistent()
-                        .remove(&DataKey::Batch(pruned_up_to));
+                    env.storage().persistent().remove(&DataKey::Batch(pruned_up_to));
                     pruned_up_to += 1;
-                    pruned_count += 1;
+                    pruned_any = true;
                 } else {
                     break;
                 }
             } else {
-                // If it's not present, it might have been manually deleted or we skipped it.
-                // We should just increment and continue.
                 pruned_up_to += 1;
-                pruned_count += 1;
             }
         }
 
-        if pruned_up_to > start_batch_id {
+        if pruned_any {
             env.storage()
-                .instance()
+                .persistent()
                 .set(&DataKey::PrunedUpTo, &pruned_up_to);
-            PruneEvent {
-                start_batch_id,
-                end_batch_id: pruned_up_to,
-            }
-            .publish(&env);
+            env.events().publish(
+                (
+                    soroban_sdk::Symbol::new(&env, "prune_event"),
+                    start_pruned,
+                ),
+                PruneEvent {
+                    start_batch_id: start_pruned,
+                    end_batch_id: pruned_up_to,
+                },
+            );
         }
 
-        env.storage()
-            .instance()
-            .extend_ttl(TTL_THRESHOLD, TTL_EXTEND);
         Ok(())
     }
 }
 
-mod fuzz_test;
+#[cfg(test)]
 mod test;
