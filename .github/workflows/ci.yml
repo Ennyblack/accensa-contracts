@@ -7,6 +7,28 @@ on:
     branches: [ "main" ]
 
 jobs:
+  msrv:
+    name: msrv (1.82.0)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Rust MSRV
+        uses: dtolnay/rust-toolchain@1.82.0
+        with:
+          targets: wasm32v1-none
+      - name: Cache cargo
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-msrv-${{ hashFiles('**/Cargo.lock') }}
+      - name: Build and Test MSRV
+        run: |
+          cargo build --target wasm32v1-none --release
+          cargo test
+
   fmt:
     name: fmt
     runs-on: ubuntu-latest
@@ -75,6 +97,6 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-wasm-${{ hashFiles('**/Cargo.lock') }}
-      - name: Wasm build
+          key: ${{ runner.os }}-cargo-build-wasm-${{ hashFiles('**/Cargo.lock') }}
+      - name: Build WASM
         run: cargo build --target wasm32v1-none --release
