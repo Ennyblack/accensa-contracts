@@ -13,6 +13,14 @@ When consuming these events, indexers should:
 
 ## `ReceiptAnchor` Events
 
+### 0. `InitializeEvent`
+Emitted when the contract is successfully initialized.
+
+- **Topics**: `("initialize_event", admin: Address)`
+- **Data Map**:
+  - `admin` (`Address`): The admin address.
+  - `version` (`String`): The contract version from `CARGO_PKG_VERSION`.
+
 ### 1. `AnchorEvent`
 Emitted when a new batch of receipts is anchored by the merchant.
 
@@ -36,6 +44,15 @@ Emitted when old batches are pruned to reclaim rent.
 ---
 
 ## `RefundVault` Events
+
+### 0. `InitializeEvent`
+Emitted when the contract is successfully initialized.
+
+- **Topics**: `("initialize_event", admin: Address)`
+- **Data Map**:
+  - `admin` (`Address`): The admin address.
+  - `token` (`Address`): The settlement token address.
+  - `refund_window_ledgers` (`u32`): The refund window in ledgers.
 
 ### 3. `DepositEvent`
 Emitted when the merchant tops up the vault's float.
