@@ -51,6 +51,10 @@ Users are untrusted. The contracts must assume any data submitted by users could
 - **Threat:** An attacker attempts to process a refund after the designated refund window has expired.
 - **Mitigation:** The contract enforces the refund window by strictly comparing the current ledger sequence against the `paid_at_ledger` plus the `RefundWindow`. If the threshold is crossed, the transaction is rejected with a `WindowExpired` error.
 
+### Zero Window Misconfiguration
+- **Threat:** A merchant accidentally or intentionally sets a refund window of `0`, implicitly attempting to create an 'unlimited' refund window.
+- **Mitigation:** Unlimited refund windows are deemed illegitimate to eliminate silent misconfigurations and unsafe defaults. Both `initialize` and `set_refund_window` explicitly reject any window value of `0` (or below `MIN_REFUND_WINDOW`) with an `InvalidWindow` error.
+
 ### Float Draining (Negative/Zero Amounts)
 - **Threat:** An attacker tries to refund a negative amount to cause an underflow or steal funds.
 - **Mitigation:** Explicit validation ensures that the `amount` is strictly greater than zero (`InvalidAmount` error) before executing token transfers, preventing unintended arithmetic behaviors or logical exploits.
@@ -69,4 +73,3 @@ For Classic Stellar assets wrapped in a Stellar Asset Contract (like USDC), the 
 If you discover a vulnerability that breaks any of the security properties or
 mitigations described in this document, please follow our private disclosure
 guidelines in [SECURITY.md](../SECURITY.md).
-
