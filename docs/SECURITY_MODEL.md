@@ -37,6 +37,12 @@ The off-chain indexer service is responsible for aggregating receipts and comput
 ### 3. The User (Buyer)
 Users are untrusted. The contracts must assume any data submitted by users could be malicious and must validate all inputs (e.g., verifying amounts are greater than zero, verifying proofs).
 
+## PrunedUpTo Invariant and Gap Handling
+
+In `ReceiptAnchor`, `PrunedUpTo` represents the watermark up to which batches have been deliberately and verifiedly pruned. 
+- **Invariant:** Every batch ID strictly less than `PrunedUpTo` has been deliberately removed by `prune_batches`. 
+- **Gap Safeguard:** If any batch entry is missing during pruning (due to TTL archival or manual removal), the prune loop halts immediately rather than incrementing past the gap silently. This ensures that archived entries restored later can never end up below `PrunedUpTo`, upholding the integrity guarantee for all consumers trusting `PrunedUpTo`.
+
 ## Attack Vectors and Mitigations
 
 ### Replay Attacks
@@ -67,6 +73,5 @@ For Classic Stellar assets wrapped in a Stellar Asset Contract (like USDC), the 
 ## Vulnerability Reporting
 
 If you discover a vulnerability that breaks any of the security properties or
-mitigations described in this document, please follow our private disclosure
+nitigations described in this document, please follow our private disclosure
 guidelines in [SECURITY.md](../SECURITY.md).
-
