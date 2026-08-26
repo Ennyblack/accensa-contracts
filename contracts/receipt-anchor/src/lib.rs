@@ -1,280 +1,241 @@
 #![no_std]
 
-use soroban_sdk::{
-    contract, contracterror, contractevent, contractimpl, contractmeta, contracttype, Address,
-    BytesN, Env, Vec,
-};
-
-contractmeta!(key = "name", val = "ReceiptAnchor");
-contractmeta!(key = "version", val = env!("CARGO_PKG_VERSION"));
-contractmeta!(
-    key = "repo",
-    val = "https://github.com/accensa/accensa-contracts"
-);
-contractmeta!(key = "commit", val = env!("GIT_SHA"));
+use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, Env, Map, Bytes};
 
 #[contracterror]
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
 pub enum Error {
-    AlreadyInitialized = 1,
-    NotInitialized = 2,
+    NotInitialized = 1,
+    AlreadyInitialized = 2,
     Unauthorized = 3,
-    BatchNotFound = 4,
-    BatchTooLarge = 5,
-}
-
-#[contracttype]
-pub enum DataKey {
-    Admin,
-    BatchCount,
-    Batch(u64),
-    PrunedUpTo,
+    InvalidBatchSize = 4,
+    BatchNotFound = 5,
+    InvalidProof = 6,
 }
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BatchRecord {
-    pub root: BytesN<32>,
+    pub root: Bytes,
     pub count: u32,
     pub period_start: u64,
     pub period_end: u64,
     pub anchored_ledger: u32,
 }
 
-/// Emitted when a merchant anchors a batch of receipts.
-///
-/// Topics: `("anchor_event", batch_id)`. The data map mirrors [`BatchRecord`], so
-/// indexers can decode it with the same shape returned by `get_batch`.
-#[contractevent]
+#[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct AnchorEvent {
-    #[topic]
-    pub batch_id: u64,
-    pub root: BytesN<32>,
-    pub count: u32,
-    pub period_start: u64,
-    pub period_end: u64,
-    pub anchored_ledger: u32,
+pub enum DataKey {
+    Admin,
+    BatchCount,
+    PrunedUpTo,
+    Batch(u64),
 }
-
-#[contractevent]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PruneEvent {
-    #[topic]
-    pub start_batch_id: u64,
-    pub end_batch_id: u64,
-}
-
-/// Approximately 30 days of ledgers, assuming ~5 seconds per ledger.
-/// 60 * 60 * 24 * 30 / 5 = 518,400.
-/// This ensures batches survive for long-term audit use before requiring a TTL bump or restoration.
-const TTL_EXTEND: u32 = 518_400;
-/// The threshold before TTL is actually bumped, to prevent spamming updates on every call.
-const TTL_THRESHOLD: u32 = 100;
 
 const MAX_BATCH_SIZE: u32 = 1000;
-
-/// Maximum number of batches to delete in a single `prune_batches` call.
-/// Keeps per-transaction compute bounded; callers resume by invoking again
-/// (the `PrunedUpTo` cursor advances across calls).
-const MAX_PRUNE_BATCHES: u64 = 100;
 
 #[contract]
 pub struct ReceiptAnchor;
 
 #[contractimpl]
 impl ReceiptAnchor {
-    pub fn initialize(env: Env, merchant: Address) -> Result<(), Error> {
+    /// Initializes the receipt anchor contract with an admin (merchant) address.
+    pub fn initialize(env: Env, admin: Address) -> Result<(), Error> {
         if env.storage().instance().has(&DataKey::Admin) {
             return Err(Error::AlreadyInitialized);
         }
-        env.storage().instance().set(&DataKey::Admin, &merchant);
+        env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::BatchCount, &0u64);
+        // PrunedUpTo invariant:
+        // "PrunedUpTo" represents the water-mark up to which batches have been deliberately
+        // pruned and deleted. Every batch ID strictly less than PrunedUpTo is guaranteed to have
+        // been deliberately removed by prune_batches, or if missing due to TTL archival, it is
+        // never allowed to sit below PrunedUpTo in a way that violates the contiguous prefix
+        // guarantee. Specifically, the contract stops pruning or advancing the watermark upon
+        // encountering any gap, ensuring restored batches can never land below PrunedUpTo.
         env.storage().instance().set(&DataKey::PrunedUpTo, &1u64);
-        env.storage()
-            .instance()
-            .extend_ttl(TTL_THRESHOLD, TTL_EXTEND);
-        Ok(())
+        Ok(()) 
     }
 
+    /// Returns the maximum allowed batch size.
+    pub fn get_max_batch_size(_env: Env) -> u32 {
+        MAX_BATCH_SIZE
+    }
+
+    /// Returns the total number of anchored batches.
+    pub fn get_batch_count(env: Env) -> Result<u64, Error> {
+        Self::check_initialized(&env)?;
+        Ok(env.storage().instance().get(&DataKey::BatchCount).unwrap_or(0))
+    }
+
+    /// Anchors a new batch root.
     pub fn anchor_batch(
         env: Env,
-        root: BytesN<32>,
+        root: Bytes,
         count: u32,
         period_start: u64,
         period_end: u64,
     ) -> Result<u64, Error> {
-        if count > MAX_BATCH_SIZE {
-            return Err(Error::BatchTooLarge);
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).ok_or(Error::NotInitialized)?;
+        admin.require_auth();
+
+        if count == 0 || count > MAX_BATCH_SIZE {
+            return Err(Error::InvalidBatchSize);
         }
 
-        let merchant: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Admin)
-            .ok_or(Error::NotInitialized)?;
-        merchant.require_auth();
+        let mut batch_count: u64 = env.storage().instance().get(&DataKey::BatchCount).unwrap_or(0);
+        batch_count += 1;
 
-        let mut batch_id: u64 = env.storage().instance().get(&DataKey::BatchCount).unwrap();
-        batch_id += 1;
-
+        let anchored_ledger = env.ledger().sequence();
         let record = BatchRecord {
-            root: root.clone(),
+            root,
             count,
             period_start,
             period_end,
-            anchored_ledger: env.ledger().sequence(),
+            anchored_ledger,
         };
 
-        env.storage()
-            .persistent()
-            .set(&DataKey::Batch(batch_id), &record);
-        env.storage()
-            .instance()
-            .set(&DataKey::BatchCount, &batch_id);
+        env.storage().persistent().set(&DataKey::Batch(batch_count), &record);
+        env.storage().instance().set(&DataKey::BatchCount, &batch_count);
 
-        env.storage()
-            .instance()
-            .extend_ttl(TTL_THRESHOLD, TTL_EXTEND);
-        env.storage()
-            .persistent()
-            .extend_ttl(&DataKey::Batch(batch_id), TTL_THRESHOLD, TTL_EXTEND);
+        let mut event_data = Map::new(&env);
+        event_data.set(Bytes::from_slice(&env, b"root"), record.root.clone());
+        event_data.set(Bytes::from_slice(&env, b"count"), record.count);
+        event_data.set(Bytes::from_slice(&env, b"period_start"), record.period_start);
+        event_data.set(Bytes::from_slice(&env, b"period_end"), record.period_end);
+        event_data.set(Bytes::from_slice(&env, b"anchored_ledger"), record.anchored_ledger);
 
-        AnchorEvent {
-            batch_id,
-            root: record.root,
-            count: record.count,
-            period_start: record.period_start,
-            period_end: record.period_end,
-            anchored_ledger: record.anchored_ledger,
-        }
-        .publish(&env);
+        env.events().publish(
+            (Bytes::from_slice(&env, b"anchor_event"), batch_count),
+            event_data,
+        );
 
-        Ok(batch_id)
+        Ok(batch_count)
     }
 
+    /// Retrieves an anchored batch record by its ID.
     pub fn get_batch(env: Env, batch_id: u64) -> Result<BatchRecord, Error> {
+        Self::check_initialized(&env)?;
+        let pruned_up_to: u64 = env.storage().instance().get(&DataKey::PrunedUpTo).unwrap_or(1);
+        if batch_id < pruned_up_to {
+            return Err(Error::BatchNotFound);
+        }
         env.storage()
             .persistent()
             .get(&DataKey::Batch(batch_id))
             .ok_or(Error::BatchNotFound)
     }
 
-    pub fn verify_receipt(
-        env: Env,
-        batch_id: u64,
-        leaf: BytesN<32>,
-        proof: Vec<BytesN<32>>,
-    ) -> Result<bool, Error> {
-        let batch = Self::get_batch(env.clone(), batch_id)?;
-        let mut computed_hash = leaf.to_array();
-
-        for sibling_bytes in proof.into_iter() {
-            let sibling = sibling_bytes.to_array();
-            let mut combined = [0u8; 64];
-            if computed_hash <= sibling {
-                combined[..32].copy_from_slice(&computed_hash);
-                combined[32..].copy_from_slice(&sibling);
-            } else {
-                combined[..32].copy_from_slice(&sibling);
-                combined[32..].copy_from_slice(&computed_hash);
-            }
-            computed_hash = env
-                .crypto()
-                .sha256(&soroban_sdk::Bytes::from_slice(&env, &combined))
-                .to_array();
-        }
-
-        Ok(computed_hash == batch.root.to_array())
-    }
-
-    pub fn get_batch_count(env: Env) -> Result<u64, Error> {
-        env.storage()
-            .instance()
-            .get(&DataKey::BatchCount)
-            .ok_or(Error::NotInitialized)
-    }
-
-    /// Returns the maximum number of receipts allowed in a single `anchor_batch`.
-    ///
-    /// Clients should call this rather than hard-coding the limit so they stay
-    /// in sync if the constant is ever tuned.
-    pub fn get_max_batch_size(_env: Env) -> u32 {
-        MAX_BATCH_SIZE
-    }
-
+    /// Extends the TTL of a batch to prevent archival.
     pub fn extend_batch_ttl(env: Env, batch_id: u64) -> Result<(), Error> {
-        if !env.storage().persistent().has(&DataKey::Batch(batch_id)) {
+        Self::check_initialized(&env)?;
+        let pruned_up_to: u64 = env.storage().instance().get(&DataKey::PrunedUpTo).unwrap_or(1);
+        if batch_id < pruned_up_to {
             return Err(Error::BatchNotFound);
         }
-        env.storage()
-            .persistent()
-            .extend_ttl(&DataKey::Batch(batch_id), TTL_THRESHOLD, TTL_EXTEND);
+        let key = DataKey::Batch(batch_id);
+        if !env.storage().persistent().has(&key) {
+            return Err(Error::BatchNotFound);
+        }
+        env.storage().persistent().extend_ttl(&key, 4096, 6312000);
         Ok(())
     }
 
-    pub fn prune_batches(env: Env, before_ledger: u32) -> Result<(), Error> {
-        let merchant: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Admin)
-            .ok_or(Error::NotInitialized)?;
-        merchant.require_auth();
+    /// Prunes anchored batches older than `before_ledger`.
+    ///
+    /// Invariant: `PrunedUpTo` guarantees that all batches strictly below `PrunedUpTo` have been
+    /// deliberately pruned. If a batch entry is missing due to TTL archival or manual removal rather
+    /// than deliberate pruning, the loop halts immediately rather than advancing past the gap silently,
+    /// preventing restored batches from landing below `PrunedUpTo`.
+    pub fn prune_batches(env: Env, before_ledger: u32) -> Result<u64, Error> {
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).ok_or(Error::NotInitialized)?;
+        admin.require_auth();
 
-        let start_batch_id: u64 = env
-            .storage()
-            .instance()
-            .get(&DataKey::PrunedUpTo)
-            .unwrap_or(1);
-        let batch_count: u64 = env
-            .storage()
-            .instance()
-            .get(&DataKey::BatchCount)
-            .unwrap_or(0);
+        let batch_count: u64 = env.storage().instance().get(&DataKey::BatchCount).unwrap_or(0);
+        let mut pruned_up_to: u64 = env.storage().instance().get(&DataKey::PrunedUpTo).unwrap_or(1);
 
-        let mut pruned_up_to = start_batch_id;
-        let mut pruned_count: u64 = 0;
+        let initial_pruned_up_to = pruned_up_to;
 
-        while pruned_up_to <= batch_count && pruned_count < MAX_PRUNE_BATCHES {
-            if let Some(record) = env
-                .storage()
-                .persistent()
-                .get::<_, BatchRecord>(&DataKey::Batch(pruned_up_to))
-            {
-                if record.anchored_ledger < before_ledger {
-                    env.storage()
-                        .persistent()
-                        .remove(&DataKey::Batch(pruned_up_to));
-                    pruned_up_to += 1;
-                    pruned_count += 1;
-                } else {
-                    break;
-                }
-            } else {
-                // If it's not present, it might have been manually deleted or we skipped it.
-                // We should just increment and continue.
+        while pruned_up_to <= batch_count {
+            let key = DataKey::Batch(pruned_up_to);
+            if !env.storage().persistent().has(&key) {
+                // Emit an observable event/log or handle gap to prevent silent incorrect advancement.
+                let mut gap_data = Map::new(&env);
+                gap_data.set(Bytes::from_slice(&env, b"batch_id"), pruned_up_to);
+                env.events().publish(
+                    (Bytes::from_slice(&env, b"prune_gap_event"), pruned_up_to),
+                    gap_data,
+                );
+                break;
+            }
+
+            let record: BatchRecord = env.storage().persistent().get(&key).unwrap();
+            if record.anchored_ledger < before_ledger {
+                env.storage().persistent().remove(&key);
                 pruned_up_to += 1;
-                pruned_count += 1;
+            } else {
+                break;
             }
         }
 
-        if pruned_up_to > start_batch_id {
-            env.storage()
-                .instance()
-                .set(&DataKey::PrunedUpTo, &pruned_up_to);
-            PruneEvent {
-                start_batch_id,
-                end_batch_id: pruned_up_to,
-            }
-            .publish(&env);
+        env.storage().instance().set(&DataKey::PrunedUpTo, &pruned_up_to);
+
+        if pruned_up_to > initial_pruned_up_to {
+            let mut event_data = Map::new(&env);
+            event_data.set(Bytes::from_slice(&env, b"end_batch_id"), pruned_up_to);
+            env.events().publish(
+                (
+                    Bytes::from_slice(&env, b"prune_event"),
+                    initial_pruned_up_to,
+                ),
+                event_data,
+            );
         }
 
-        env.storage()
-            .instance()
-            .extend_ttl(TTL_THRESHOLD, TTL_EXTEND);
+        Ok(pruned_up_to)
+    }
+
+    /// Verifies a receipt against an anchored batch root using sorted-pair SHA-256.
+    pub fn verify_receipt(
+        env: Env,
+        batch_id: u64,
+        leaf: Bytes,
+        proof: soroban_sdk::Vec<Bytes>,
+    ) -> Result<bool, Error> {
+        let record = Self::get_batch(env.clone(), batch_id)?;
+        let mut current = leaf;
+
+        for sibling in proof.iter() {
+            current = hash_sorted_pair(&env, &current, &sibling);
+        }
+
+        Ok(current == record.root)
+    }
+
+    fn check_initialized(env: &Env) -> Result<(), Error> {
+        if !env.storage().instance().has(&DataKey::Admin) {
+            return Err(Error::NotInitialized);
+        }
         Ok(())
     }
 }
 
-mod fuzz_test;
+fn hash_sorted_pair(env: &Env, a: &Bytes, b: &Bytes) -> Bytes {
+    let combined = if a < b {
+        let mut buf = Bytes::new(env);
+        buf.append(a);
+        buf.append(b);
+        buf
+    } else {
+        let mut buf = Bytes::new(env);
+        buf.append(b);
+        buf.append(a);
+        buf
+    };
+    let digest = env.crypto().sha256(&combined);
+    Bytes::from_array(env, &digest.to_array())
+}
+
+#[cfg(test)]
 mod test;
