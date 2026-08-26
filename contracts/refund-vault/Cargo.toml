@@ -2,18 +2,16 @@
 name = "refund-vault"
 version = "0.2.0"
 edition = "2021"
-
-[lints]
-workspace = true
-
-
-[lib]
-crate-type = ["cdylib", "rlib"]
+rust-version.workspace = true
 
 [dependencies]
-soroban-sdk = { workspace = true }
+soroban-sdk.workspace = true
 
 [dev-dependencies]
-proptest = "1.4"
 soroban-sdk = { workspace = true, features = ["testutils"] }
-receipt-anchor = { path = "../receipt-anchor" }
+
+[lib]
+crate-type = ["lib"
+             ,
+             "cdylib"
+]
