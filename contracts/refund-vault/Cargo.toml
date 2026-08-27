@@ -9,6 +9,11 @@ soroban-sdk.workspace = true
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
+proptest.workspace = true
+receipt-anchor = { path = "../receipt-anchor" }
+
+[lints]
+workspace = true
 
 [lib]
 crate-type = ["lib"
