@@ -47,7 +47,6 @@ pub struct BatchRecord {
     pub count: u32,
     pub period_start: u64,
     pub period_end: u64,
-    pub anchored_ledger: u32,
 }
 
 /// The `ReceiptShard` entry points this router calls into. Declared as a
@@ -164,7 +163,7 @@ impl ReceiptAnchor {
         shard_wasm_hash: BytesN<32>,
     ) -> Result<(), Error> {
         if env.storage().instance().has(&DataKey::Admin) {
-            return Err(Error::AlreadyInitialized);
+            return Err(Symbol::new(&env, "AlreadyInitialized"));
         }
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::BatchCount, &0u64);
@@ -461,10 +460,10 @@ impl ReceiptAnchor {
 
     /// Returns the maximum number of receipts allowed in a single `anchor_batch`.
     ///
-    /// Clients should call this rather than hard-coding the limit so they stay
-    /// in sync if the constant is ever tuned.
-    pub fn get_max_batch_size(_env: Env) -> u32 {
-        MAX_BATCH_SIZE
+    /// # Errors
+    /// - `BatchNotFound`: If the batch ID does not exist.
+    pub fn get_batch(env: Env, batch_id: u64) -> Result<BatchRecord, Symbol> {
+        env.storage().persistent().get(&DataKey::Batch(batch_id)).ok_or(Symbol::new(&env, "BatchNotFound"))
     }
 
     pub fn get_max_proof_len(_env: Env) -> u32 {

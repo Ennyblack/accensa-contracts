@@ -1,4 +1,7 @@
-#![cfg(test)]
+#[cfg(test)]
+mod test {
+    use super::*;
+    use soroban_sdk::{testutils::Address as _, Address, Env, BytesN, Symbol};
 
 use super::*;
 use soroban_sdk::{
