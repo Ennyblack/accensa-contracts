@@ -10,6 +10,29 @@ breaking changes bump the **minor** version, and they are called out as such.
 
 ### Added
 
+- **`Governance` contract**: a proposal-based, weighted-vote governance wrapper
+  that closes the single-admin-key SPOF on `ReceiptAnchor`'s merchant role. A
+  fixed set of members (each with a weight, set at construction) can `propose`
+  a call to any target contract, `vote` on it over a bounded voting window,
+  and once "yes" weight clears a configured quorum (in basis points) and
+  strictly exceeds "no" weight, anyone can `execute` it. No change to the
+  governed contract is required: `initialize` `ReceiptAnchor` with a
+  `Governance` instance's address as `merchant`, and its existing
+  merchant-gated calls (`set_min_anchor_interval`, `anchor_batch`,
+  `prune_batches`) become reachable only through a passed proposal — the
+  host's own self-authorization rule (a contract's `require_auth()` on its
+  own address auto-succeeds when it is the direct caller) is what carries the
+  authority through, the same mechanism already used for a `MultisigAccount`
+  admin. Storage is kept intentionally small: each member's weight is its own
+  persistent entry, per-voter "already voted" markers live in **temporary**
+  storage so they expire on their own with the voting window, and a resolved
+  proposal's calldata can be reclaimed immediately via `prune_proposal`
+  rather than waiting on archival. `ReceiptAnchor` has no upgrade entry point
+  (see `docs/ADR-003-upgradeability.md`, which forbids adding one without
+  reopening that ADR), so this wrapper does not gate or introduce one — it
+  covers the admin surface that actually exists today. See
+  `contracts/governance/src/lib.rs` and
+  `contracts/governance/tests/receipt_anchor_admin.rs`.
 
 - **VDF-gated refunds for `RefundVault`** (issue #138): the refund policy now
   carries a Verifiable Delay Function requirement — `propose_policy(ledgers,

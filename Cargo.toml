@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "contracts/common",
+    "contracts/governance",
     "contracts/multisig-account",
     "contracts/receipt-anchor",
     "contracts/receipt-shard",
