@@ -216,7 +216,7 @@ jobs:
       # --- Stage 1: soroban-cost-linter (static analysis, findings surfaced) ---
       - name: Install soroban-cost-linter (pinned)
         run: |
-          rustup toolchain install "$SOROBAN_COST_LINTER_NIGHTLY" --component rustc-dev llvm-tools-preview
+          rustup toolchain install "$SOROBAN_COST_LINTER_NIGHTLY" --component rustc-dev --component llvm-tools-preview
           cargo install cargo-dylint dylint-link --version "$DYLINT_VERSION" --locked
           cargo +"$SOROBAN_COST_LINTER_NIGHTLY" install \
             --git https://github.com/Tollcraft/soroban-cost-linter.git \
