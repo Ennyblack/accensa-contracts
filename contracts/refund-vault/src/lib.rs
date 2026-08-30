@@ -66,10 +66,20 @@ pub enum DataKey {
     Refund(BytesN<32>),
     IsPaused,
     PendingAdmin,
+    /// Yield strategy contract address. Stored in **Persistent** storage so
+    /// it is not loaded on every non-yield invocation (issue #131).
     YieldStrategy,
+    /// Cumulative principal deployed to the yield strategy. Persistent
+    /// storage; see `YieldStrategy` rationale above.
     DeployedPrincipal,
+    /// Cumulative yield harvested from the strategy and held in the vault
+    /// for operator withdrawal. Persistent storage (issue #131).
     HarvestedYield,
+    /// Minimum liquid reserve ratio in basis points. Persistent storage
+    /// (issue #131).
     ReserveRatio,
+    /// Maximum deployment ratio in basis points. Persistent storage
+    /// (issue #131).
     MaxDeployRatio,
     PendingPolicy,
     /// Whitelisted oracle contracts, in insertion order. The aggregator
@@ -714,6 +724,18 @@ impl RefundVault {
         let contract_addr = env.current_contract_address();
         let addr_str = contract_addr.to_string();
         let separator = env.crypto().sha256(&soroban_sdk::Bytes::from(addr_str));
+        env.storage()
+            .instance()
+            .set(&DataKey::DomainSeparator, &separator);
+        env.storage().instance().set(&DataKey::Nonce, &0u64);
+
+        // Issue #136: store the domain separator (this contract's address)
+        // and initialise the monotonic nonce to 0.
+        let contract_addr = env.current_contract_address();
+        // The domain separator is a hash of the contract address so that
+        // events and off-chain signatures can be bound to exactly one
+        // deployment.
+        let separator = env.crypto().sha256(&contract_addr.to_buffer());
         env.storage()
             .instance()
             .set(&DataKey::DomainSeparator, &separator);
@@ -1599,7 +1621,7 @@ impl RefundVault {
         let nonce = increment_nonce(&env);
 
         YieldDeployedEvent {
-            strategy: strategy.clone(),
+            strategy,
             amount,
             nonce,
         }
