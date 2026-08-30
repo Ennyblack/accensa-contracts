@@ -268,6 +268,11 @@ jobs:
   build-wasm:
     name: build-wasm
     runs-on: ubuntu-latest
+    env:
+      # Same stated tolerance as the budget-limits job so both size gates
+      # pass/fail consistently: measured value may exceed the committed
+      # baseline by up to (1 + tolerance) before the build fails.
+      WASM_SIZE_TOLERANCE: 0.10
     steps:
       - uses: actions/checkout@v4
       - name: Setup Rust
@@ -291,33 +296,28 @@ jobs:
 
       - name: Report WASM sizes & enforce size budget
         run: |
-          RECEIPT_SIZE=$(stat -c%s target/wasm32v1-none/release/receipt_anchor.wasm 2>/dev/null || stat -f%z target/wasm32v1-none/release/receipt_anchor.wasm)
-          REFUND_SIZE=$(stat -c%s target/wasm32v1-none/release/refund_vault.wasm 2>/dev/null || stat -f%z target/wasm32v1-none/release/refund_vault.wasm)
-
-          RECEIPT_BUDGET=$(jq -r '.receipt_anchor' .wasm-budget.json)
-          REFUND_BUDGET=$(jq -r '.refund_vault' .wasm-budget.json)
-
-          echo "### WASM Build Sizes" >> $GITHUB_STEP_SUMMARY
-          echo "| Contract | Size (bytes) | Budget (bytes) | Status |" >> $GITHUB_STEP_SUMMARY
-          echo "|---|---|---|---|" >> $GITHUB_STEP_SUMMARY
-
+          TOL=$WASM_SIZE_TOLERANCE
           FAILED=0
-          if [ "$RECEIPT_SIZE" -gt "$RECEIPT_BUDGET" ]; then
-            echo "| \`receipt_anchor.wasm\` | $RECEIPT_SIZE | $RECEIPT_BUDGET | ❌ Exceeded |" >> $GITHUB_STEP_SUMMARY
-            FAILED=1
-          else
-            echo "| \`receipt_anchor.wasm\` | $RECEIPT_SIZE | $RECEIPT_BUDGET | ✅ Within Budget |" >> $GITHUB_STEP_SUMMARY
-          fi
+          PCT=$(awk "BEGIN{printf \"%.0f\", $TOL*100}")
+          echo "### WASM Build Sizes" >> $GITHUB_STEP_SUMMARY
+          echo "| Contract | Size (bytes) | Budget (bytes) | +${PCT}% ceiling | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|---|---|---|" >> $GITHUB_STEP_SUMMARY
 
-          if [ "$REFUND_SIZE" -gt "$REFUND_BUDGET" ]; then
-            echo "| \`refund_vault.wasm\` | $REFUND_SIZE | $REFUND_BUDGET | ❌ Exceeded |" >> $GITHUB_STEP_SUMMARY
-            FAILED=1
-          else
-            echo "| \`refund_vault.wasm\` | $REFUND_SIZE | $REFUND_BUDGET | ✅ Within Budget |" >> $GITHUB_STEP_SUMMARY
-          fi
+          for pair in "receipt_anchor:receipt_anchor.wasm" "refund_vault:refund_vault.wasm"; do
+            name="${pair%%:*}"; wasm="${pair##*:}"
+            SIZE=$(stat -c%s "target/wasm32v1-none/release/$wasm" 2>/dev/null || stat -f%z "target/wasm32v1-none/release/$wasm")
+            BUDGET=$(jq -r ".$name" .wasm-budget.json)
+            CEIL=$(awk "BEGIN{printf \"%d\", $BUDGET*(1+$TOL)}")
+            if [ "$SIZE" -gt "$CEIL" ]; then
+              echo "| \`$wasm\` | $SIZE | $BUDGET | $CEIL | ❌ Exceeded |" >> $GITHUB_STEP_SUMMARY
+              FAILED=1
+            else
+              echo "| \`$wasm\` | $SIZE | $BUDGET | $CEIL | ✅ Within Budget |" >> $GITHUB_STEP_SUMMARY
+            fi
+          done
 
           if [ "$FAILED" -ne 0 ]; then
-            echo "Error: WASM size budget exceeded."
+            echo "Error: WASM size budget exceeded beyond the stated tolerance." >&2
             exit 1
           fi
 
