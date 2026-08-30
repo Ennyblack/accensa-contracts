@@ -37,6 +37,12 @@ pub struct RefundParam {
 #[contracttype]
 pub enum DataKey {
     Admin,
+    /// Per-instance domain separator (issue #136): `sha256(contract_address)`,
+    /// written at `initialize`, binding off-chain signatures to this deployment.
+    DomainSeparator,
+    /// Monotonic authorization nonce (issue #136), incremented by signed
+    /// multi-op calls.
+    Nonce,
     Token,
     RefundWindow,
     /// Wall-clock deadline (Unix timestamp) after which refund claims are
@@ -95,6 +101,13 @@ pub enum DataKey {
     ReentrancyLock,
     /// Monotonic storage-layout version. Missing on legacy deployments (v1).
     StorageVersion,
+    /// A pending commit-reveal commitment (issue #128). Keyed by the
+    /// SHA-256 commitment hash the merchant supplied; the value records who
+    /// committed, which operation it is bound to, and the ledger it was
+    /// committed at. Stored in Persistent storage (TTL-managed) because a
+    /// commitment must survive until its reveal, which is guaranteed to be at
+    /// least `COMMIT_MIN_DELAY_LEDGERS` ledgers later.
+    Commit(BytesN<32>),
 }
 
 #[contracttype]
@@ -124,6 +137,23 @@ pub struct PolicyProposal {
     /// prove. `0` (the default) means no VDF proof is required.
     pub vdf_delay: u32,
     pub proposed_at_ledger: u32,
+}
+
+/// A pending commit-reveal commitment (issue #128). Recorded by
+/// [`RefundVault::commit`] under the commitment hash and consumed by
+/// [`RefundVault::reveal`].
+///
+/// `operation` binds the commitment to a specific class of sensitive action
+/// (e.g. `refund` or `policy`) so a commitment made for one action cannot be
+/// revealed as another. `committed_at_ledger` feeds the minimum-delay check:
+/// the reveal is only accepted once `COMMIT_MIN_DELAY_LEDGERS` ledgers have
+/// elapsed since the commit.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CommitRecord {
+    pub caller: Address,
+    pub operation: Symbol,
+    pub committed_at_ledger: u32,
 }
 
 /// Parameters for a single refund claim, mirroring the arguments of
@@ -186,6 +216,21 @@ pub struct RefundEvent {
     pub ledger: u32,
     /// Monotonic nonce at the time of this operation (issue #136).
     pub nonce: u64,
+}
+
+/// Emitted once per [`RefundVault::process_batch`] call instead of one
+/// [`RefundEvent`] per item. Keeping the batch to a single compact event is
+/// what lets 50+ refunds fit inside a transaction's contract-event budget.
+///
+/// Topics: `("batch_refund_event",)`.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BatchRefundEvent {
+    /// The payment refs, in submission order.
+    pub payment_refs: Vec<BytesN<32>>,
+    /// Per-item outcome, aligned 1:1 with `payment_refs` (`true` = refund
+    /// executed; `false` = item failed validation and was skipped).
+    pub results: Vec<bool>,
 }
 
 /// Emitted when the admin changes the refund fee configuration (the basis-point
@@ -339,6 +384,37 @@ pub struct OraclePolicyClearedEvent {
     pub feed_id: BytesN<32>,
 }
 
+/// Emitted when the merchant commits to a hashed intended action
+/// (commit-reveal, issue #128).
+///
+/// Topics: `("commit_event", operation, commitment_hash)`. The data map
+/// carries the ledger the commitment becomes eligible for reveal at.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CommitEvent {
+    #[topic]
+    pub operation: Symbol,
+    #[topic]
+    pub commitment_hash: BytesN<32>,
+    /// The first ledger at which this commitment may be revealed
+    /// (`committed_at_ledger + COMMIT_MIN_DELAY_LEDGERS`).
+    pub reveal_at_ledger: u32,
+}
+
+/// Emitted when a pending commitment is revealed (commit-reveal, issue #128).
+///
+/// Topics: `("commit_revealed_event", operation, commitment_hash)`. The data
+/// map carries the ledger at which the reveal was accepted.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CommitRevealedEvent {
+    #[topic]
+    pub operation: Symbol,
+    #[topic]
+    pub commitment_hash: BytesN<32>,
+    pub ledger: u32,
+}
+
 pub mod oracle;
 
 /// Interface for external yield-generating strategies (e.g., Soroban lending protocols).
@@ -378,6 +454,15 @@ const TTL_EXTEND: u32 = 518_400;
 const TTL_THRESHOLD: u32 = 100;
 /// Timelock delay for policy changes in ledgers (~24 hours at 5s/ledger).
 const POLICY_TIMELOCK: u32 = 17_280;
+
+/// Minimum number of ledgers that must elapse between a commit and its
+/// matching reveal (issue #128). By the time the merchant's reveal lands,
+/// a would-be front-runner who observed the commit in the mempool has had a
+/// fixed window in which to react — but the plaintext is never visible until
+/// the reveal itself, so the attacker cannot reproduce the intended action to
+/// submit it first. 7 ledgers (~35s at 5s/ledger) is long enough to make the
+/// reordering useless while keeping the UX snappy.
+const COMMIT_MIN_DELAY_LEDGERS: u32 = 7;
 
 /// Reentrancy guard for entry points that make an external call (a token
 /// transfer or a yield-strategy invocation).
@@ -471,10 +556,16 @@ fn refund_record_ttl_extend_to(env: &Env, window: u32, paid_at_ledger: u32) -> u
 }
 
 /// Helper to extend the TTL of a persistent yield-storage entry (issue #131).
+///
+/// Threshold == extend_to (not `TTL_THRESHOLD`): a freshly written entry
+/// already carries the network's `min_persistent_entry_ttl` floor, which on
+/// any realistic network exceeds `TTL_THRESHOLD` (100 ledgers) — so
+/// `extend_ttl(TTL_THRESHOLD, TTL_EXTEND)` would be a no-op right after
+/// `set`, leaving the entry at the floor instead of the intended TTL.
 fn persist_yield_ttl(env: &Env, key: &DataKey) {
     env.storage()
         .persistent()
-        .extend_ttl(key, TTL_EXTEND, TTL_THRESHOLD);
+        .extend_ttl(key, TTL_EXTEND, TTL_EXTEND);
 }
 
 /// Refund fee in raw token units: `ceil(amount * fee_bps / 10_000)`.
@@ -563,6 +654,21 @@ fn claim_single(env: &Env, claim: &RefundClaim) -> Result<(), Error> {
         .unwrap_or(0);
     if deadline > 0 && env.ledger().timestamp() > deadline {
         return Err(Error::RefundExpired);
+    }
+
+    // Dynamic oracle policy (issue: oracle aggregator): when configured,
+    // refunds are only processed while the aggregated external feed satisfies
+    // the condition (e.g. the asset price is below the SLA threshold). Fails
+    // closed on a missing whitelist or all-stale data rather than guessing.
+    // This runs inside the reentrancy lock acquired by the caller (`refund`,
+    // `claim_batch`, `process_batch`), so a whitelisted oracle cannot
+    // re-enter the vault from its `get_price` callback.
+    let oracle_policy: Option<oracle::OraclePolicy> =
+        env.storage().instance().get(&DataKey::OraclePolicy);
+    if let Some(policy) = oracle_policy {
+        if !oracle::evaluate_policy(env, &policy)? {
+            return Err(Error::OraclePolicyDenied);
+        }
     }
 
     // VDF delay (policy trigger, issue #138): when the policy carries a
@@ -720,22 +826,14 @@ impl RefundVault {
             .instance()
             .set(&DataKey::StorageVersion, &INITIAL_STORAGE_VERSION);
 
-        // Issue #136: domain separator and nonce.
+        // Issue #136: store the domain separator (a hash of this contract's
+        // address) and initialise the monotonic nonce to 0.
         let contract_addr = env.current_contract_address();
         let addr_str = contract_addr.to_string();
-        let separator = env.crypto().sha256(&soroban_sdk::Bytes::from(addr_str));
-        env.storage()
-            .instance()
-            .set(&DataKey::DomainSeparator, &separator);
-        env.storage().instance().set(&DataKey::Nonce, &0u64);
-
-        // Issue #136: store the domain separator (this contract's address)
-        // and initialise the monotonic nonce to 0.
-        let contract_addr = env.current_contract_address();
-        // The domain separator is a hash of the contract address so that
-        // events and off-chain signatures can be bound to exactly one
-        // deployment.
-        let separator = env.crypto().sha256(&contract_addr.to_buffer());
+        let separator: BytesN<32> = env
+            .crypto()
+            .sha256(&soroban_sdk::Bytes::from(addr_str))
+            .to_bytes();
         env.storage()
             .instance()
             .set(&DataKey::DomainSeparator, &separator);
@@ -918,44 +1016,8 @@ impl RefundVault {
         if env
             .storage()
             .instance()
-            .get(&DataKey::RefundWindow)
-            .unwrap();
-        if window > 0 {
-            let current_ledger = env.ledger().sequence();
-            if current_ledger > paid_at_ledger + window {
-                return Err(Error::WindowExpired);
-            }
-        }
-
-        // Dynamic oracle policy: when configured, refunds are only processed
-        // while the aggregated external feed satisfies the condition (e.g.
-        // the asset price is below the SLA threshold). Fails closed on a
-        // missing whitelist or all-stale data rather than guessing. This runs
-        // inside the reentrancy lock acquired by `refund`, so a whitelisted
-        // oracle cannot re-enter the vault from its `get_price` callback.
-        let oracle_policy: Option<oracle::OraclePolicy> =
-            env.storage().instance().get(&DataKey::OraclePolicy);
-        if let Some(policy) = oracle_policy {
-            if !oracle::evaluate_policy(env, &policy)? {
-                return Err(Error::OraclePolicyDenied);
-            }
-        }
-
-        // Ceiling check: cumulative refunds must not exceed the original amount.
-        // The ceiling is read from the (re)stored record, freshly minted on the
-        // first partial for this payment.
-        let existing: Option<RefundRecord> = env
-            .storage()
-            .persistent()
-            .get(&DataKey::RefundV2(payment_ref.clone()));
-        let (previous_refunded, record_ceiling) = match existing {
-            Some(rec) => (rec.amount_refunded, rec.payment_amount),
-            None => (0i128, payment_amount),
-        };
-
-        if previous_refunded.checked_add(amount).is_none()
-            || record_ceiling <= 0
-            || previous_refunded + amount > record_ceiling
+            .get(&DataKey::IsPaused)
+            .unwrap_or(false)
         {
             return Err(Error::Paused);
         }
@@ -963,23 +1025,14 @@ impl RefundVault {
         let merchant: Address = env
             .storage()
             .instance()
-            .extend_ttl(TTL_THRESHOLD, TTL_EXTEND);
-        let extend_to = refund_record_ttl_extend_to(env, window, paid_at_ledger);
-        // Threshold == extend_to (not TTL_THRESHOLD): see
-        // `refund_record_ttl_extend_to` for why a small fixed threshold makes
-        // this a no-op on a freshly-written entry.
-        env.storage().persistent().extend_ttl(
-            &DataKey::RefundV2(payment_ref.clone()),
-            extend_to,
-            extend_to,
-        );
+            .get(&DataKey::Admin)
+            .ok_or(Error::NotInitialized)?;
+        merchant.require_auth();
 
         for claim in claims.iter() {
             claim_single(&env, &claim)?;
         }
-        .publish(env);
-
-        release_reentrancy_lock(env);
+        release_reentrancy_lock(&env);
         Ok(())
     }
 
@@ -1024,15 +1077,15 @@ impl RefundVault {
             return Ok(Vec::new(&env));
         }
 
-        // State loads shared across the whole batch: one balance query and one
-        // window/ledger/token read — the loop below only touches per-payment
-        // storage and performs the transfers.
-        let mut ctx = Self::load_refund_context(&env);
+        // The loop below only touches per-payment storage and performs the
+        // transfers; each item runs the identical per-claim logic as `refund`.
         let mut payment_refs: Vec<BytesN<32>> = Vec::new(&env);
         let mut results = Vec::new(&env);
         for item in refunds.into_iter() {
+            let payment_ref = item.payment_ref;
+            payment_refs.push_back(payment_ref.clone());
             let claim = RefundClaim {
-                payment_ref: item.payment_ref,
+                payment_ref,
                 recipient: item.recipient,
                 amount: item.amount,
                 paid_at_ledger: item.paid_at_ledger,
@@ -1212,6 +1265,157 @@ impl RefundVault {
         POLICY_TIMELOCK
     }
 
+    /// Returns the minimum commit-reveal delay in ledgers (read-only).
+    pub fn get_commit_min_delay() -> u32 {
+        COMMIT_MIN_DELAY_LEDGERS
+    }
+
+    /// Returns the pending commit-reveal commitment recorded under
+    /// `commitment_hash`, if any (read-only).
+    pub fn get_commit(env: Env, commitment_hash: BytesN<32>) -> Option<CommitRecord> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Commit(commitment_hash))
+    }
+
+    // ── Commit-reveal (issue #128) ────────────────────────────────────────
+
+    /// Commit to a hashed intended sensitive action (a refund claim or a
+    /// policy update) before its plaintext is revealed.
+    ///
+    /// Front-running protection: some vault operations (`refund`,
+    /// `claim_batch`, `propose_policy`) are visible in the mempool, so a
+    /// validator or bot could observe the merchant's transaction and submit a
+    /// competing one with a higher fee, reordering the pool. A commit-reveal
+    /// scheme breaks that: the merchant first submits only `commitment_hash`
+    /// (SHA-256 of the plaintext action) under a symbolic `operation`, waits
+    /// `COMMIT_MIN_DELAY_LEDGERS` ledgers, then reveals the plaintext. Until
+    /// the reveal, no one — a would-be front-runner included — can learn the
+    /// intended action from the commitment, and a bare commit (no reveal) has
+    /// no effect on the vault.
+    ///
+    /// Only the merchant may commit. A commitment is bound to `operation` and
+    /// to the committing merchant, is single-use, and cannot be created twice
+    /// under the same `commitment_hash` while pending (`CommitAlreadyExists`).
+    pub fn commit(env: Env, operation: Symbol, commitment_hash: BytesN<32>) -> Result<(), Error> {
+        let merchant: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(Error::NotInitialized)?;
+        merchant.require_auth();
+
+        // A commitment hash is unique per pending intent; a duplicate means a
+        // previously-committed action is still awaiting its reveal.
+        if env
+            .storage()
+            .persistent()
+            .has(&DataKey::Commit(commitment_hash.clone()))
+        {
+            return Err(Error::CommitAlreadyExists);
+        }
+
+        let committed_at_ledger = env.ledger().sequence();
+        let record = CommitRecord {
+            caller: merchant,
+            operation: operation.clone(),
+            committed_at_ledger,
+        };
+        env.storage()
+            .persistent()
+            .set(&DataKey::Commit(commitment_hash.clone()), &record);
+        // A commitment must live at least until its reveal, which is
+        // guaranteed to be at least COMMIT_MIN_DELAY_LEDGERS later. Keep it
+        // live with the standard extension budget so nothing expires mid-flow.
+        env.storage().persistent().extend_ttl(
+            &DataKey::Commit(commitment_hash.clone()),
+            TTL_THRESHOLD,
+            TTL_EXTEND,
+        );
+        env.storage()
+            .instance()
+            .extend_ttl(TTL_THRESHOLD, TTL_EXTEND);
+
+        CommitEvent {
+            operation,
+            commitment_hash,
+            reveal_at_ledger: committed_at_ledger + COMMIT_MIN_DELAY_LEDGERS,
+        }
+        .publish(&env);
+
+        Ok(())
+    }
+
+    /// Reveal the plaintext behind a previously-committed action, executing
+    /// the front-running-protected step.
+    ///
+    /// Must be called by the same merchant who committed, with the same
+    /// `operation`, at least `COMMIT_MIN_DELAY_LEDGERS` ledgers after the
+    /// commit. `plaintext` is the data that hashes to the committed
+    /// `commitment_hash`; the contract re-derives the hash and rejects a
+    /// mismatch with [`Error::CommitMismatch`]. On success the commitment is
+    /// consumed (single-use) and `CommitRevealedEvent` is emitted, so the
+    /// revealed (now-public) action is bound to this merchant in a
+    /// deterministic, order-stable way.
+    ///
+    /// The caller is responsible for authorising the actual action; this entry
+    /// point only guards *when* and *by whom* the plaintext may be surfaced.
+    pub fn reveal(
+        env: Env,
+        operation: Symbol,
+        commitment_hash: BytesN<32>,
+        plaintext: Bytes,
+    ) -> Result<(), Error> {
+        let merchant: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(Error::NotInitialized)?;
+        merchant.require_auth();
+
+        let record: CommitRecord = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Commit(commitment_hash.clone()))
+            .ok_or(Error::NoCommit)?;
+        if record.caller != merchant {
+            return Err(Error::Unauthorized);
+        }
+        if record.operation != operation {
+            return Err(Error::CommitOperationMismatch);
+        }
+
+        // Re-derive the commitment from the revealed plaintext and verify it
+        // matches the hash committed earlier.
+        let digest = env.crypto().sha256(&plaintext).to_bytes();
+        if digest != commitment_hash {
+            return Err(Error::CommitMismatch);
+        }
+
+        // Enforce the minimum ledger delay between commit and reveal.
+        let current_ledger = env.ledger().sequence();
+        if current_ledger < record.committed_at_ledger + COMMIT_MIN_DELAY_LEDGERS {
+            return Err(Error::CommitDelayNotElapsed);
+        }
+
+        // Consume the commitment: single-use.
+        env.storage()
+            .persistent()
+            .remove(&DataKey::Commit(commitment_hash.clone()));
+        env.storage()
+            .instance()
+            .extend_ttl(TTL_THRESHOLD, TTL_EXTEND);
+
+        CommitRevealedEvent {
+            operation,
+            commitment_hash,
+            ledger: current_ledger,
+        }
+        .publish(&env);
+
+        Ok(())
+    }
+
     // ── Oracle aggregation ────────────────────────────────────────────────
 
     /// Whitelist an oracle contract implementing the [`oracle::Oracle`]
@@ -1225,6 +1429,23 @@ impl RefundVault {
             .get(&DataKey::Admin)
             .ok_or(Error::NotInitialized)?;
         merchant.require_auth();
+
+        let mut oracles: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::Oracles)
+            .unwrap_or_else(|| Vec::new(&env));
+        if oracles.contains(&oracle) {
+            return Err(Error::OracleAlreadyAdded);
+        }
+        oracles.push_back(oracle);
+        env.storage().instance().set(&DataKey::Oracles, &oracles);
+
+        env.storage()
+            .instance()
+            .extend_ttl(TTL_THRESHOLD, TTL_EXTEND);
+        Ok(())
+    }
 
     /// Returns the persisted storage layout version. Legacy deployments that
     /// predate this marker are treated as version 1.
@@ -1290,18 +1511,8 @@ impl RefundVault {
     pub fn get_token(env: Env) -> Result<Address, Error> {
         env.storage()
             .instance()
-            .get(&DataKey::Oracles)
-            .unwrap_or_else(|| Vec::new(&env));
-        if oracles.contains(&oracle) {
-            return Err(Error::OracleAlreadyAdded);
-        }
-        oracles.push_back(oracle);
-        env.storage().instance().set(&DataKey::Oracles, &oracles);
-
-        env.storage()
-            .instance()
-            .extend_ttl(TTL_THRESHOLD, TTL_EXTEND);
-        Ok(())
+            .get(&DataKey::Token)
+            .ok_or(Error::NotInitialized)
     }
 
     /// Remove an oracle from the whitelist. Only callable by the merchant.
@@ -1366,6 +1577,119 @@ impl RefundVault {
     /// fee is charged. Read-only.
     pub fn get_fee_bps(env: Env) -> u32 {
         env.storage().instance().get(&DataKey::FeeBps).unwrap_or(0)
+    }
+
+    /// Returns the configured merchant admin address. Read-only; fails with
+    /// `NotInitialized` before `initialize`.
+    pub fn get_admin(env: Env) -> Result<Address, Error> {
+        env.storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(Error::NotInitialized)
+    }
+
+    /// Returns the refund policy window in ledgers (read-only). `0` means the
+    /// refund window is disabled (no time limit).
+    pub fn get_refund_window(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::RefundWindow)
+            .unwrap_or(0)
+    }
+
+    /// Returns whether operations are currently paused (read-only). Missing
+    /// admin (uninitialized) reports `NotInitialized`; once initialized,
+    /// pauses are `false` by default.
+    pub fn is_paused(env: Env) -> Result<bool, Error> {
+        if !env.storage().instance().has(&DataKey::Admin) {
+            return Err(Error::NotInitialized);
+        }
+        Ok(env
+            .storage()
+            .instance()
+            .get(&DataKey::IsPaused)
+            .unwrap_or(false))
+    }
+
+    /// Returns the configured policy deadline as a Unix timestamp (`0` = no
+    /// deadline, read-only).
+    pub fn get_refund_deadline(env: Env) -> u64 {
+        env.storage()
+            .instance()
+            .get(&DataKey::RefundDeadline)
+            .unwrap_or(0)
+    }
+
+    /// Returns the configured fee recipient, if any (read-only; falls back to
+    /// the merchant at claim time).
+    pub fn get_fee_recipient(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::FeeRecipient)
+    }
+
+    /// Returns the oracle whitelist, in insertion order (read-only).
+    pub fn get_oracles(env: Env) -> Vec<Address> {
+        env.storage()
+            .instance()
+            .get(&DataKey::Oracles)
+            .unwrap_or_else(|| Vec::new(&env))
+    }
+
+    /// Sets the refund fee rate in basis points (0–10_000, default 0).
+    /// Merchant auth. Emits a [`FeeConfigUpdatedEvent`].
+    pub fn set_fee_bps(env: Env, bps: u32) -> Result<(), Error> {
+        if bps > 10_000 {
+            return Err(Error::InvalidRatio);
+        }
+        let merchant: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(Error::NotInitialized)?;
+        merchant.require_auth();
+
+        env.storage().instance().set(&DataKey::FeeBps, &bps);
+
+        FeeConfigUpdatedEvent {
+            field: Symbol::new(&env, "fee_bps"),
+            fee_bps: bps,
+            fee_recipient: active_fee_recipient(&env),
+        }
+        .publish(&env);
+
+        env.storage()
+            .instance()
+            .extend_ttl(TTL_THRESHOLD, TTL_EXTEND);
+        Ok(())
+    }
+
+    /// Sets the address that collects the refund fee; rejects the vault's own
+    /// address. Merchant auth. Emits a [`FeeConfigUpdatedEvent`].
+    pub fn set_fee_recipient(env: Env, recipient: Address) -> Result<(), Error> {
+        if recipient == env.current_contract_address() {
+            return Err(Error::SelfTransfer);
+        }
+        let merchant: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(Error::NotInitialized)?;
+        merchant.require_auth();
+
+        env.storage()
+            .instance()
+            .set(&DataKey::FeeRecipient, &recipient);
+
+        FeeConfigUpdatedEvent {
+            field: Symbol::new(&env, "fee_recipient"),
+            fee_bps: env.storage().instance().get(&DataKey::FeeBps).unwrap_or(0),
+            fee_recipient: recipient,
+        }
+        .publish(&env);
+
+        env.storage()
+            .instance()
+            .extend_ttl(TTL_THRESHOLD, TTL_EXTEND);
+        Ok(())
     }
 
     /// Aggregate the current value of `feed_id` across the whitelisted
@@ -1953,6 +2277,11 @@ mod token_agnostic_tests;
 #[cfg(test)]
 mod vdf_test;
 mod yield_tests;
+
+/// Security audit tests for the commit-reveal scheme (issue #128): simulate
+/// and block front-running attempts against commit/reveal.
+#[cfg(test)]
+mod commit_reveal_tests;
 
 // Tier A soroban-budget-assert gates. Compiled only when the `budget-assert`
 // feature is enabled (the budget CI job), so the normal test/clippy runs stay

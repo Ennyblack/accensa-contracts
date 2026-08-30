@@ -2,12 +2,29 @@
 
 use super::*;
 use soroban_sdk::{
-    testutils::{storage::Persistent as _, Address as _, Events, Ledger},
+    testutils::{storage::Persistent as _, Address as _, Ledger},
     token::{StellarAssetClient, TokenClient},
     vec, Address, Env, Val,
 };
 
 const FLOAT: i128 = 1_000_000;
+
+fn setup(window: u32) -> (Env, RefundVaultClient<'static>, Address, Address) {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let merchant = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let sac = env.register_stellar_asset_contract_v2(token_admin);
+    let token = sac.address();
+    StellarAssetClient::new(&env, &token).mint(&merchant, &FLOAT);
+
+    let contract_id = env.register(RefundVault, ());
+    let client = RefundVaultClient::new(&env, &contract_id);
+    client.initialize(&merchant, &token, &window);
+
+    (env, client, merchant, token)
+}
 
 #[test]
 fn test_domain_separator_differs_per_instance() {
@@ -210,7 +227,7 @@ fn test_nonce_increments_on_withdraw() {
 
 #[test]
 fn test_nonce_does_not_increment_on_failed_operation() {
-    let (_env, client, merchant, _token) = setup(100);
+    let (env, client, merchant, _token) = setup(100);
     client.deposit(&merchant, &500_000);
 
     env.ledger().with_mut(|li| li.sequence_number = 500);
@@ -278,11 +295,28 @@ fn test_nonce_is_strictly_monotonic() {
     let (env, client, merchant, _token) = setup(100);
     client.deposit(&merchant, &500_000);
 
-    // Enforcing mode with no signatures: merchant.require_auth() must abort.
-    env.set_auths(&[]);
+    let mut previous = client.get_nonce();
+
     let payment_ref = BytesN::from_array(&env, &[8u8; 32]);
     let buyer = Address::generate(&env);
     client.refund(&payment_ref, &buyer, &100, &0, &100, &None);
+    let after_refund = client.get_nonce();
+    assert!(
+        after_refund > previous,
+        "nonce must increase after refund: {} -> {}",
+        previous,
+        after_refund
+    );
+    previous = after_refund;
+
+    client.withdraw(&100, &merchant);
+    let after_withdraw = client.get_nonce();
+    assert!(
+        after_withdraw > previous,
+        "nonce must increase after withdraw: {} -> {}",
+        previous,
+        after_withdraw
+    );
 }
 
 #[test]
@@ -399,16 +433,20 @@ fn contract_outcome<T>(
     }
 }
 
-    client.deposit(&merchant, &100_000);
-    seen_nonces.push(client.get_nonce());
+/// One state-changing operation of the vault's public surface.
+struct PausedSurfaceOp<'a> {
+    name: &'static str,
+    invoke: &'a dyn Fn() -> Result<(), Error>,
+}
 
-    client.withdraw(&50_000, &merchant);
-    seen_nonces.push(client.get_nonce());
+#[test]
+fn test_paused_state_blocks_and_preserves_every_operation() {
+    let (env, client, merchant, token) = setup(100);
+    client.deposit(&merchant, &600_000);
+    let token_client = TokenClient::new(&env, &token);
 
-    let payment_ref = BytesN::from_array(&env, &[0xBBu8; 32]);
+    let payment_ref = BytesN::from_array(&env, &[0x80u8; 32]);
     let buyer = Address::generate(&env);
-    client.refund(&payment_ref, &buyer, &10_000, &0, &10_000);
-    seen_nonces.push(client.get_nonce());
 
     // Every IsPaused-gated operation, with arguments that would succeed while
     // the vault is unpaused.
@@ -480,9 +518,19 @@ fn contract_outcome<T>(
             op.name
         );
         assert!(
-            window[1] > window[0],
-            "nonce must be strictly monotonic: got {:?}",
-            seen_nonces
+            client.get_refund(&payment_ref).is_none(),
+            "{} created a refund record while paused",
+            op.name
+        );
+        assert_eq!(
+            info.deployed_principal, yield_info_before.deployed_principal,
+            "{} mutated deployed principal while paused",
+            op.name
+        );
+        assert_eq!(
+            info.harvested_yield, yield_info_before.harvested_yield,
+            "{} mutated harvested yield while paused",
+            op.name
         );
     }
 
@@ -559,6 +607,15 @@ fn test_events_emitted() {
 
     client.deposit(&merchant, &500_000);
 
+    let mut deposit_data = Map::<Val, Val>::new(&env);
+    deposit_data.set(
+        Symbol::new(&env, "amount").into_val(&env),
+        500_000i128.into_val(&env),
+    );
+    deposit_data.set(
+        Symbol::new(&env, "nonce").into_val(&env),
+        0u64.into_val(&env),
+    );
     assert_eq!(
         env.events().all().filter_by_contract(&client.address),
         vec![
@@ -566,7 +623,7 @@ fn test_events_emitted() {
             (
                 client.address.clone(),
                 (Symbol::new(&env, "deposit_event"), merchant.clone()).into_val(&env),
-                soroban_sdk::map![&env, (Symbol::new(&env, "amount"), 500_000i128)].into_val(&env)
+                deposit_data.into_val(&env)
             )
         ]
     );
@@ -600,6 +657,10 @@ fn test_events_emitted() {
         Symbol::new(&env, "ledger").into_val(&env),
         env.ledger().sequence().into_val(&env),
     );
+    refund_data.set(
+        Symbol::new(&env, "nonce").into_val(&env),
+        1u64.into_val(&env),
+    );
     assert_eq!(
         refund_events,
         vec![
@@ -614,6 +675,15 @@ fn test_events_emitted() {
 
     client.withdraw(&100_000, &merchant);
 
+    let mut withdraw_data = Map::<Val, Val>::new(&env);
+    withdraw_data.set(
+        Symbol::new(&env, "amount").into_val(&env),
+        100_000i128.into_val(&env),
+    );
+    withdraw_data.set(
+        Symbol::new(&env, "nonce").into_val(&env),
+        2u64.into_val(&env),
+    );
     assert_eq!(
         env.events().all().filter_by_contract(&client.address),
         vec![
@@ -621,7 +691,7 @@ fn test_events_emitted() {
             (
                 client.address.clone(),
                 (Symbol::new(&env, "withdraw_event"), merchant.clone()).into_val(&env),
-                soroban_sdk::map![&env, (Symbol::new(&env, "amount"), 100_000i128)].into_val(&env)
+                withdraw_data.into_val(&env)
             )
         ]
     );
@@ -1882,6 +1952,23 @@ fn test_refund_to_contract_address_fails_self_transfer() {
     assert_eq!(events.events().len(), 0);
 }
 
+/// Build a `Vec<RefundParam>` with `n` distinct payments, each claiming
+/// `per_refund` (ceiling == amount), used by the batch-path security tests.
+fn batch_params(env: &Env, n: u32, per_refund: i128) -> Vec<RefundParam> {
+    let mut out = Vec::new(env);
+    for i in 0..n {
+        out.push_back(RefundParam {
+            payment_ref: BytesN::from_array(env, &[i as u8; 32]),
+            recipient: Address::generate(env),
+            amount: per_refund,
+            paid_at_ledger: 0,
+            payment_amount: per_refund,
+            vdf_proof: None,
+        });
+    }
+    out
+}
+
 /// The batch path must reject items targeting the vault itself (fail closed,
 /// skipped with `false`) instead of consuming the payment_ref while leaving
 /// float untouched — the self-transfer threat in SECURITY_MODEL §Threats.
@@ -1902,6 +1989,7 @@ fn test_process_batch_item_to_contract_address_skipped() {
             amount: per_refund,
             paid_at_ledger: 0,
             payment_amount: per_refund,
+            vdf_proof: None,
         },
     );
 
@@ -2041,6 +2129,7 @@ fn expect_refund_event(
     fee: i128,
     cumulative_refunded: i128,
     recipient: &Address,
+    nonce: u64,
 ) -> (soroban_sdk::Address, Vec<Val>, Val) {
     use soroban_sdk::{IntoVal, Map, Symbol};
 
@@ -2062,6 +2151,7 @@ fn expect_refund_event(
         Symbol::new(env, "ledger").into_val(env),
         env.ledger().sequence().into_val(env),
     );
+    data.set(Symbol::new(env, "nonce").into_val(env), nonce.into_val(env));
 
     (
         client.address.clone(),
@@ -2136,9 +2226,9 @@ fn test_claim_batch_emits_one_event_per_item() {
         env.events().all().filter_by_contract(&client.address),
         vec![
             &env,
-            expect_refund_event(&env, &client, &ref1, 100_000, 0, 100_000, &b1),
-            expect_refund_event(&env, &client, &ref2, 50_000, 0, 50_000, &b2),
-            expect_refund_event(&env, &client, &ref3, 250_000, 0, 250_000, &b3),
+            expect_refund_event(&env, &client, &ref1, 100_000, 0, 100_000, &b1, 1),
+            expect_refund_event(&env, &client, &ref2, 50_000, 0, 50_000, &b2, 2),
+            expect_refund_event(&env, &client, &ref3, 250_000, 0, 250_000, &b3, 3),
         ]
     );
 }

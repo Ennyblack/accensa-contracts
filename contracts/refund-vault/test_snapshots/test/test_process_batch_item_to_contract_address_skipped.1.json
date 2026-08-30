@@ -134,7 +134,7 @@
                             "symbol": "payment_ref"
                           },
                           "val": {
-                            "bytes": "c000000000000000000000000000000000000000000000000000000000000000"
+                            "bytes": "0000000000000000000000000000000000000000000000000000000000000000"
                           }
                         },
                         {
@@ -144,6 +144,12 @@
                           "val": {
                             "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAK3IM"
                           }
+                        },
+                        {
+                          "key": {
+                            "symbol": "vdf_proof"
+                          },
+                          "val": "void"
                         }
                       ]
                     },
@@ -178,7 +184,7 @@
                             "symbol": "payment_ref"
                           },
                           "val": {
-                            "bytes": "c000010000000000000000000000000000000000000000000000000000000000"
+                            "bytes": "0101010101010101010101010101010101010101010101010101010101010101"
                           }
                         },
                         {
@@ -188,6 +194,12 @@
                           "val": {
                             "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4"
                           }
+                        },
+                        {
+                          "key": {
+                            "symbol": "vdf_proof"
+                          },
+                          "val": "void"
                         }
                       ]
                     }
@@ -328,7 +340,7 @@
                     "symbol": "RefundV2"
                   },
                   {
-                    "bytes": "c000000000000000000000000000000000000000000000000000000000000000"
+                    "bytes": "0000000000000000000000000000000000000000000000000000000000000000"
                   }
                 ]
               },
@@ -414,6 +426,30 @@
                       "key": {
                         "vec": [
                           {
+                            "symbol": "DomainSeparator"
+                          }
+                        ]
+                      },
+                      "val": {
+                        "bytes": "0ecb188156fe839e84b079ba797da21e155fef714cee6b0da7bfad7be630ea72"
+                      }
+                    },
+                    {
+                      "key": {
+                        "vec": [
+                          {
+                            "symbol": "Nonce"
+                          }
+                        ]
+                      },
+                      "val": {
+                        "u64": "2"
+                      }
+                    },
+                    {
+                      "key": {
+                        "vec": [
+                          {
                             "symbol": "ReentrancyLock"
                           }
                         ]
@@ -432,6 +468,18 @@
                       },
                       "val": {
                         "u32": 100
+                      }
+                    },
+                    {
+                      "key": {
+                        "vec": [
+                          {
+                            "symbol": "StorageVersion"
+                          }
+                        ]
+                      },
+                      "val": {
+                        "u32": 1
                       }
                     },
                     {

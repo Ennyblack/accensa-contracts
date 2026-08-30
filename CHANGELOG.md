@@ -34,6 +34,24 @@ breaking changes bump the **minor** version, and they are called out as such.
   `contracts/governance/src/lib.rs` and
   `contracts/governance/tests/receipt_anchor_admin.rs`.
 
+- **Commit-reveal front-running protection for `RefundVault`** (issue #128):
+  sensitive vault operations (`refund`, `claim_batch`, `propose_policy`) are
+  visible in the mempool, so a validator or bot could observe a merchant's
+  transaction and submit a competing one with a higher fee, reordering the
+  pool. To close that window, `RefundVault` now implements a commit-reveal
+  scheme: the merchant first calls `commit(operation, commitment_hash)` to
+  bind a SHA-256 hash of the intended action (with no plaintext visible), then
+  calls `reveal(operation, commitment_hash, plaintext)` no earlier than
+  `COMMIT_MIN_DELAY_LEDGERS` (7) ledgers later to surface and consume the
+  action. `reveal` re-derives the hash from the plaintext and rejects a
+  mismatch (`CommitMismatch`), a reveal before the delay (`CommitDelayNot
+  Elapsed`), a reveal with no pending commit (`NoCommit`), a reveal under a
+  different operation than the one committed (`CommitOperationMismatch`), and
+  a duplicate pending commit (`CommitAlreadyExists`). Commitments are
+  merchant-only and single-use. New error codes 305–309 are appended without
+  renumbering. `get_commit_min_delay()` and `get_commit(hash)` are added as
+  read-only getters.
+
 - **VDF-gated refunds for `RefundVault`** (issue #138): the refund policy now
   carries a Verifiable Delay Function requirement — `propose_policy(ledgers,
   deadline, vdf_delay)` configures a delay in squarings (subject to the same

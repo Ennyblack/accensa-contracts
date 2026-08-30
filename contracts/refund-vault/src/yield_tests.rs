@@ -696,6 +696,15 @@ fn test_yield_deployed_event() {
 
     let events = env.events().all().filter_by_contract(&vault_client.address);
     // Yield events now carry a monotonic nonce (issue #136).
+    let mut data = Map::<Val, Val>::new(&env);
+    data.set(
+        Symbol::new(&env, "amount").into_val(&env),
+        2_000_000i128.into_val(&env),
+    );
+    data.set(
+        Symbol::new(&env, "nonce").into_val(&env),
+        1u64.into_val(&env),
+    );
     assert_eq!(
         events,
         vec![
@@ -707,12 +716,7 @@ fn test_yield_deployed_event() {
                     strategy_addr.clone()
                 )
                     .into_val(&env),
-                soroban_sdk::map![
-                    &env,
-                    (Symbol::new(&env, "amount"), 2_000_000i128),
-                    (Symbol::new(&env, "nonce"), 1i128),
-                ]
-                .into_val(&env)
+                data.into_val(&env)
             )
         ]
     );
@@ -721,7 +725,7 @@ fn test_yield_deployed_event() {
 #[test]
 fn test_yield_harvested_event() {
     use soroban_sdk::testutils::Events;
-    use soroban_sdk::{vec, IntoVal, Symbol};
+    use soroban_sdk::{vec, IntoVal, Map, Symbol, Val};
 
     let (env, vault_client, merchant, _token, strategy_addr, _tc) = setup_with_strategy(0, 10_000);
 
@@ -735,6 +739,15 @@ fn test_yield_harvested_event() {
 
     let events = env.events().all().filter_by_contract(&vault_client.address);
     // Harvested event carries the nonce too.
+    let mut data = Map::<Val, Val>::new(&env);
+    data.set(
+        Symbol::new(&env, "amount").into_val(&env),
+        200_000i128.into_val(&env),
+    );
+    data.set(
+        Symbol::new(&env, "nonce").into_val(&env),
+        2u64.into_val(&env),
+    );
     assert_eq!(
         events,
         vec![
@@ -742,12 +755,7 @@ fn test_yield_harvested_event() {
             (
                 vault_client.address.clone(),
                 (Symbol::new(&env, "yield_harvested_event"),).into_val(&env),
-                soroban_sdk::map![
-                    &env,
-                    (Symbol::new(&env, "amount"), 200_000i128),
-                    (Symbol::new(&env, "nonce"), 2i128),
-                ]
-                .into_val(&env)
+                data.into_val(&env)
             )
         ]
     );
@@ -951,7 +959,7 @@ fn test_yield_info_survives_refund() {
     // Refund from liquid balance — must not alter yield state.
     let payment_ref = BytesN::from_array(&env, &[0xAAu8; 32]);
     let buyer = Address::generate(&env);
-    vault_client.refund(&payment_ref, &buyer, &500_000, &0, &500_000);
+    vault_client.refund(&payment_ref, &buyer, &500_000, &0, &500_000, &None);
 
     let info_after = vault_client.get_yield_info();
     assert_eq!(

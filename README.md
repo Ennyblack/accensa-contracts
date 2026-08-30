@@ -271,12 +271,10 @@ contracts instead of per-contract tables.
 | 17 | `NothingToHarvest` | Nothing to harvest from the yield strategy. |
 | 18 | `InvalidRatio` | A configured ratio was out of range. |
 | 19 | `ExceedsPayment` | Cumulative refunds would exceed the payment ceiling. |
-| 302 | `NoOraclesConfigured` | No oracle contracts are whitelisted on the vault. |
-| 303 | `OracleAlreadyAdded` | An oracle contract is already on the whitelist. |
-| 304 | `OracleNotFound` | The oracle contract is not on the whitelist. |
-| 305 | `StaleOracleData` | Every whitelisted oracle returned stale data for the requested feed. |
-| 306 | `NoOraclePolicy` | No dynamic oracle policy is configured. |
-| 307 | `OraclePolicyDenied` | A refund was rejected because the oracle policy condition was not met. |
+| 20 | `ReentrancyBlocked` | A guarded, external-call-making entry point was re-entered while a prior invocation was still in progress. |
+| 21 | `SelfTransfer` | A refund or withdraw was attempted where the recipient is the contract's own address. |
+| 22 | `FloatNotEmpty` | An attempt to change the vault's token address was made while the vault holds a non-zero token balance. |
+| 23 | `RefundExpired` | A refund claim was submitted after the policy deadline timestamp passed. |
 | 100 | `BatchNotFound` | The requested batch does not exist (or was pruned). |
 | 101 | `BatchTooLarge` | A batch larger than `MAX_BATCH_SIZE` was submitted. |
 | 102 | `ShardCallFailed` | A shard call returned an unexpected shape. |
@@ -287,7 +285,21 @@ contracts instead of per-contract tables.
 | 203 | `InvalidProof` | The zero-knowledge validity proof is invalid or malformed. |
 | 300 | `NoPendingPolicy` | No pending policy change exists to execute. |
 | 301 | `TimelockNotExpired` | The policy timelock period has not yet elapsed. |
-| 302 | `FuturePaidAtLedger` | A refund reported `paid_at_ledger` in the future (greater than the current ledger sequence). |
+| 302 | `VdfProofRequired` | A refund was claimed against a policy with a VDF delay configured but no VDF proof was supplied. |
+| 303 | `InvalidVdfProof` | The supplied VDF proof failed verification (tampered output or witness, premature proof, or degenerate challenge). |
+| 304 | `VdfNotConfigured` | A VDF proof was supplied for a claim against a policy that has no VDF delay configured. |
+| 305 | `NoCommit` | A reveal was attempted without a matching, pending commit (commit-reveal). |
+| 306 | `CommitAlreadyExists` | A commit was submitted for a commitment hash that already has a pending commitment (commit-reveal). |
+| 307 | `CommitMismatch` | The plaintext revealed does not hash to the committed value (commit-reveal). |
+| 308 | `CommitDelayNotElapsed` | A reveal was attempted before the minimum commit-reveal ledger delay elapsed (commit-reveal). |
+| 309 | `CommitOperationMismatch` | A reveal was attempted under a different operation than the one the commitment was originally bound to (commit-reveal). |
+| 310 | `NoOraclesConfigured` | No oracle contracts are whitelisted on the vault. |
+| 311 | `OracleAlreadyAdded` | An oracle contract is already on the whitelist. |
+| 312 | `OracleNotFound` | The oracle contract is not on the whitelist. |
+| 313 | `StaleOracleData` | Every whitelisted oracle returned stale data for the requested feed. |
+| 314 | `NoOraclePolicy` | No dynamic oracle policy is configured. |
+| 315 | `OraclePolicyDenied` | A refund was rejected because the oracle policy condition was not met. |
+| 316 | `InvalidMigrationVersion` | `migrate_state` was called with a target layout version not greater than the current storage version. |
 
 Codes are stable: new variants are appended with fresh values, never renumbered.
 Note that `10`/`11` are deliberately unassigned (`MetadataTooLong` and

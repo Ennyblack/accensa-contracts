@@ -100,4 +100,35 @@ pub enum Error {
     /// A VDF proof was supplied for a claim against a policy that has no VDF
     /// delay configured.
     VdfNotConfigured = 304,
+    /// A reveal was attempted without a matching, pending commit
+    /// (commit-reveal, issue #128).
+    NoCommit = 305,
+    /// A commit was submitted for a commitment hash that already has a pending
+    /// commitment (commit-reveal, issue #128).
+    CommitAlreadyExists = 306,
+    /// The plaintext revealed does not hash to the committed value
+    /// (commit-reveal, issue #128).
+    CommitMismatch = 307,
+    /// A reveal was attempted before the minimum commit-reveal ledger delay
+    /// elapsed (commit-reveal, issue #128).
+    CommitDelayNotElapsed = 308,
+    /// A reveal was attempted under a different operation than the one the
+    /// commitment was originally bound to (commit-reveal, issue #128).
+    CommitOperationMismatch = 309,
+    /// No oracle contracts are whitelisted on the vault, so the dynamic
+    /// oracle policy cannot be evaluated (fail closed).
+    NoOraclesConfigured = 310,
+    /// An oracle contract is already on the whitelist.
+    OracleAlreadyAdded = 311,
+    /// The oracle contract is not on the whitelist.
+    OracleNotFound = 312,
+    /// Every whitelisted oracle returned stale data for the requested feed.
+    StaleOracleData = 313,
+    /// No dynamic oracle policy is configured.
+    NoOraclePolicy = 314,
+    /// A refund was rejected because the oracle policy condition was not met.
+    OraclePolicyDenied = 315,
+    /// `migrate_state` was called with a target layout version that is not
+    /// greater than the current storage version (or is otherwise invalid).
+    InvalidMigrationVersion = 316,
 }
