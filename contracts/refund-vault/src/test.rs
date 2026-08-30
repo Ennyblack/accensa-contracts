@@ -1936,6 +1936,49 @@ fn test_refund_to_contract_address_fails_self_transfer() {
     assert_eq!(events.events().len(), 0);
 }
 
+/// The batch path must reject items targeting the vault itself (fail closed,
+/// skipped with `false`) instead of consuming the payment_ref while leaving
+/// float untouched — the self-transfer threat in SECURITY_MODEL §Threats.
+#[test]
+fn test_process_batch_item_to_contract_address_skipped() {
+    let (env, client, merchant, token) = setup(100);
+    let per_refund = 10_000i128;
+    client.deposit(&merchant, &(2 * per_refund));
+
+    let mut params = batch_params(&env, 2, per_refund);
+    let vault_addr = client.address.clone();
+    // Point the second item at the vault itself.
+    params.set(
+        1,
+        RefundParam {
+            payment_ref: params.get(1).unwrap().payment_ref,
+            recipient: vault_addr,
+            amount: per_refund,
+            paid_at_ledger: 0,
+            payment_amount: per_refund,
+        },
+    );
+
+    env.cost_estimate()
+        .budget()
+        .reset_limits(2_000_000_000, 2_000_000_000);
+    let res = client.process_batch(&params);
+
+    // First item refunded, second skipped (self-transfer), no panic.
+    assert_eq!(res, vec![&env, true, false]);
+    assert!(client
+        .get_refund(&params.get(0).unwrap().payment_ref)
+        .is_some());
+    assert!(client
+        .get_refund(&params.get(1).unwrap().payment_ref)
+        .is_none());
+    // Float intact except the one legit payout.
+    assert_eq!(
+        TokenClient::new(&env, &token).balance(&client.address),
+        per_refund
+    );
+}
+
 #[test]
 fn test_withdraw_to_contract_address_fails_self_transfer() {
     use soroban_sdk::testutils::Events;

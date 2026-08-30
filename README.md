@@ -175,6 +175,13 @@ cumulative total (`amount_refunded`) plus the `payment_amount` ceiling, the
 configured, each `RefundEvent` also carries the `fee` deducted from the claim,
 and the fee is paid to the `fee_recipient` alongside the recipient's payout.
 
+`process_batch` deliberately emits **one** `BatchRefundEvent` for the whole batch
+instead of one `RefundEvent` per item: a per-refund event costs ~530 bytes of
+contract-event budget, and mainnet caps a transaction at 16 KiB — so 50+ refunds
+would not fit if each emitted its own event. The token contract's per-refund
+`transfer` event (unavoidable) dominates what remains, which is why
+`MAX_REFUND_BATCH_SIZE` is 50.
+
 **Cross-Contract Joins** (both claims below are pinned by tests in
 `contracts/refund-vault/tests/integration_test.rs`):
 - **`payment_ref` ↔ receipt-leaf** *(covered by `readme_claim_payment_ref_is_receipt_leaf`)*: The `payment_ref` used to key refunds is identical to the `leaf` hash of the payment receipt anchored in `ReceiptAnchor`. This 1:1 mapping guarantees that the on-chain refund explicitly corresponds to the exact payment record provided to the agent.

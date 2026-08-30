@@ -143,12 +143,17 @@ pub struct YieldInfo {
     pub max_deploy_ratio: u32,
 }
 
-/// Emitted when a (possibly partial) refund is made from the vault float.
+/// Emitted when a (possibly partial) refund is made from the vault float via
+/// the single-refund `refund` entry point.
 ///
 /// Topics: `("refund_event", payment_ref)`. The data map carries the amount
 /// for **this call** (`amount`) and the running total after it
 /// (`cumulative_refunded`), so an indexer knows the state of a payment without
 /// summing history.
+///
+/// Refunds processed through [`RefundVault::process_batch`] do **not** emit
+/// one of these per item: a batch emits a single [`BatchRefundEvent`] instead
+/// (see its docs for why).
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RefundEvent {
@@ -854,6 +859,17 @@ impl RefundVault {
             return Err(Error::BatchTooLarge);
         }
 
+        // An empty batch is a no-op; return before touching any state so the
+        // caller can probe auth without paying for state loads.
+        if refunds.is_empty() {
+            return Ok(Vec::new(&env));
+        }
+
+        // State loads shared across the whole batch: one balance query and one
+        // window/ledger/token read — the loop below only touches per-payment
+        // storage and performs the transfers.
+        let mut ctx = Self::load_refund_context(&env);
+        let mut payment_refs: Vec<BytesN<32>> = Vec::new(&env);
         let mut results = Vec::new(&env);
         for item in refunds.into_iter() {
             let claim = RefundClaim {
@@ -866,6 +882,16 @@ impl RefundVault {
             };
             results.push_back(claim_single(&env, &claim).is_ok());
         }
+
+        BatchRefundEvent {
+            payment_refs,
+            results: results.clone(),
+        }
+        .publish(&env);
+
+        env.storage()
+            .instance()
+            .extend_ttl(TTL_THRESHOLD, TTL_EXTEND);
         Ok(results)
     }
 
