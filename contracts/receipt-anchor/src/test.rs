@@ -1217,6 +1217,29 @@ fn test_commit_meta_is_well_formed() {
 }
 
 #[test]
+fn test_verify_receipt_batch_size_instruction_benchmark() {
+    extern crate std;
+    let (env, client, merchant) = setup();
+    init(&env, &client, &merchant);
+
+    // A balanced tree's proof depth is ceil(log2(batch size)). Measure the
+    // actual invocation cost at the sizes that determine transaction limits.
+    for (batch_size, proof_len) in [(1u32, 0u32), (10, 4), (25, 5), (50, 6), (100, 7)] {
+        let leaf = BytesN::from_array(&env, &[batch_size as u8; 32]);
+        let (root, proof) = build_chain_proof(&env, &leaf, proof_len);
+        let batch_id = client.anchor_batch(&root, &batch_size, &0, &100);
+
+        env.cost_estimate().budget().reset_default();
+        assert!(client.verify_receipt(&batch_id, &leaf, &proof));
+        let cpu = env.cost_estimate().budget().cpu_instruction_cost();
+        std::println!(
+            "BENCHMARK: batch_size={batch_size} proof_len={proof_len} cpu_instructions={cpu}"
+        );
+        assert!(cpu > 0, "benchmark must record CPU instructions");
+    }
+}
+
+#[test]
 fn test_verify_receipt_memory_scaling_benchmark() {
     extern crate std;
     let (env, client, merchant) = setup();

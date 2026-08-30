@@ -3,6 +3,7 @@
 pub mod zk_verifier;
 
 use accensa_common::Error;
+use sha2::{Digest, Sha256};
 use soroban_sdk::{
     contract, contractclient, contractevent, contractimpl, contractmeta, contracttype, Address,
     BytesN, Env, InvokeError, Vec,
@@ -364,7 +365,13 @@ impl ReceiptAnchor {
             return Err(Error::RootNotFound);
         }
 
-        let mut computed_hash = leaf.to_array();
+        let computed_hash = Self::fold_proof(leaf.to_array(), proof);
+
+        Ok(computed_hash == root.to_array())
+    }
+
+    /// Folds a sorted-pair Merkle proof with one allocation-free guest loop.
+    fn fold_proof(mut computed_hash: [u8; 32], proof: Vec<BytesN<32>>) -> [u8; 32] {
         for sibling_bytes in proof.into_iter() {
             let sibling = sibling_bytes.to_array();
             let mut combined = [0u8; 64];
@@ -375,13 +382,11 @@ impl ReceiptAnchor {
                 combined[..32].copy_from_slice(&sibling);
                 combined[32..].copy_from_slice(&computed_hash);
             }
-            computed_hash = env
-                .crypto()
-                .sha256(&soroban_sdk::Bytes::from_slice(&env, &combined))
-                .to_array();
+            let mut hasher = Sha256::new();
+            hasher.update(combined);
+            computed_hash = hasher.finalize().into();
         }
-
-        Ok(computed_hash == root.to_array())
+        computed_hash
     }
 
     /// Returns the current ring buffer of historical roots (read-only).

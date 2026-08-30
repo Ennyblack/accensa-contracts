@@ -10,7 +10,7 @@ breaking changes bump the **minor** version, and they are called out as such.
 
 ### Added
 
-<<<<<<< HEAD
+
 - **VDF-gated refunds for `RefundVault`** (issue #138): the refund policy now
   carries a Verifiable Delay Function requirement — `propose_policy(ledgers,
   deadline, vdf_delay)` configures a delay in squarings (subject to the same
@@ -37,14 +37,14 @@ breaking changes bump the **minor** version, and they are called out as such.
   contract's modulus is a fixed constant with its factors discarded after
   generation; a production deployment should replace it with a
   ceremony-chosen modulus (see `docs/SECURITY_MODEL.md` § "VDF Fairness").
-=======
+
 - **ZK validity proof batch anchoring for `ReceiptAnchor`**: `anchor_batch_zk`
   allows merchants to anchor batch state roots on-chain by providing a Groth16
   zero-knowledge validity proof (`ZkProof`), verifying validity in $O(1)$ time
   and saving computational overhead on-chain. Added `verify_zk_proof` to verify
   Groth16 proofs against verifying keys and public inputs, and introduced
   `Error::InvalidProof` (code 203).
->>>>>>> main
+
 
 - **Best-effort batch refunds for `RefundVault`**: `process_batch(refunds)`
   processes up to 100 claims in one transaction (`Vec<RefundParam>`, same shape
@@ -122,16 +122,27 @@ breaking changes bump the **minor** version, and they are called out as such.
   with `--workspace --exclude testutils` — the `testutils` workspace member
   activates `soroban-sdk`'s `testutils` feature, which is not supported on the
   `wasm32v1-none` target and made every wasm build fail at the SDK boundary.
+
+
   The `.wasm-budget.json` size budgets are updated to the current deterministic
   release builds (receipt-anchor 33,067 B, refund-vault 85,453 B) with ~5%
   headroom — the exact-pin approach kept breaking on toolchain drift, and the
   refund-vault budget had not caught up with the VDF crypto code.
+
   The `ReceiptAnchor` budget gate in `fuzz_test.rs` is re-baselined for
   `verify_receipt`: the pure-WASM SHA-256 folding merged in #250 moved hashing
   out of the host into WASM, raising the host CPU instruction count for that
   path (~569.9k → ~780.8k) while cutting WASM instructions; the gate's limits
   now reflect the current implementation (measured 2026-08-29) and still allow
   15% headroom for toolchain drift.
+
+- **Lower-cost Merkle proof verification** (issue #125): `ReceiptShard` and
+  `ReceiptAnchor` now fold sorted-pair proofs in a single iterative pure-WASM
+  SHA-256 loop, avoiding redundant proof buffering and host crypto roundtrips.
+  Batch-size instruction measurements were added to the ReceiptAnchor test suite
+  and documented in `docs/BENCHMARKS.md`.
+
+
 - **Advanced WASM Memory Management for Merkle Proofs** (issue #139):
   Refactored `ReceiptShard::verify_receipt` to copy host vector inputs into a stack-allocated
   static buffer (`proof_buffer: [[u8; 32]; 128]`) and perform intermediate hashing using the pure Wasm
