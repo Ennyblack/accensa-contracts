@@ -28,16 +28,18 @@ accensa-common = { workspace = true }
 # this adds no new crates; `default-features = false` keeps it no_std / no
 # rand. Pure RustCrypto code, no_std, wasm32-compatible.
 crypto-bigint = { version = "0.5.5", default-features = false }
+# Tollcraft/soroban-budget-assert — Tier A local assertion macros. Used only by
+# `src/budget_test.rs` (compiled under `#[cfg(all(test, feature =
+# "budget-assert"))]`). Kept as an *optional* dependency (not a dev-dependency,
+# which Cargo forbids being optional) so it is only compiled when the
+# `budget-assert` feature is on; normal test/clippy/wasm builds never pull it
+# in or resolve its git ref.
+# NOTE: pin this to a released tag (e.g. `tag = "v0.1.0"`) once a tag exists;
+# `main` is used here so the dependency always resolves.
+budget_macros = { git = "https://github.com/Tollcraft/soroban-budget-assert.git", branch = "main", package = "budget-macros", optional = true }
 
 [dev-dependencies]
 multisig-account = { path = "../multisig-account", features = ["testutils"] }
 proptest = "1.4"
 soroban-sdk = { workspace = true, features = ["testutils"] }
 receipt-anchor = { path = "../receipt-anchor" }
-# Tollcraft/soroban-budget-assert — Tier A local assertion macros. Pinned to a
-# stable ref; the macros read `env.cost_estimate().budget()` on the WASM-mode
-# estimate and fail the test if the pinned limit is exceeded. Optional so it is
-# only compiled when the `budget-assert` feature is on.
-# NOTE: pin this to a released tag (e.g. `tag = "v0.1.0"`) once a tag exists;
-# `main` is used here so the dependency always resolves.
-budget_macros = { git = "https://github.com/Tollcraft/soroban-budget-assert.git", branch = "main", package = "budget-macros", optional = true }

@@ -28,7 +28,9 @@ use soroban_sdk::{
 
 /// Compute the SHA-256 commitment hash `commit` would expect for `plaintext`.
 fn commit_hash(env: &Env, plaintext: &[u8]) -> BytesN<32> {
-    env.crypto().sha256(&Bytes::from_slice(env, plaintext))
+    env.crypto()
+        .sha256(&Bytes::from_slice(env, plaintext))
+        .to_bytes()
 }
 
 /// A minimal, self-contained vault harness (window 100 ledgers, no float

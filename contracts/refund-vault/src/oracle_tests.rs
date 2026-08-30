@@ -476,14 +476,14 @@ fn test_refund_gated_by_price_drop_policy() {
 
     // Price 300 >= 250: condition not met, refund denied and nothing recorded.
     assert_eq!(
-        vault_client.try_refund(&payment_ref, &buyer, &100_000, &0, &100_000),
+        vault_client.try_refund(&payment_ref, &buyer, &100_000, &0, &100_000, &None),
         Err(Ok(Error::OraclePolicyDenied))
     );
     assert!(vault_client.get_refund(&payment_ref).is_none());
 
     // The price drops below the floor: the same refund now succeeds.
     set_feed_price(&env, &oracle, &feed_id, &200);
-    vault_client.refund(&payment_ref, &buyer, &100_000, &0, &100_000);
+    vault_client.refund(&payment_ref, &buyer, &100_000, &0, &100_000, &None);
 
     let record = vault_client.get_refund(&payment_ref).unwrap();
     assert_eq!(record.amount_refunded, 100_000);
@@ -513,12 +513,12 @@ fn test_refund_gated_by_rise_policy() {
 
     // Metric 100 <= 250: condition not met (refunds only above the ceiling).
     assert_eq!(
-        vault_client.try_refund(&payment_ref, &buyer, &100_000, &0, &100_000),
+        vault_client.try_refund(&payment_ref, &buyer, &100_000, &0, &100_000, &None),
         Err(Ok(Error::OraclePolicyDenied))
     );
 
     set_feed_price(&env, &oracle, &feed_id, &300);
-    vault_client.refund(&payment_ref, &buyer, &100_000, &0, &100_000);
+    vault_client.refund(&payment_ref, &buyer, &100_000, &0, &100_000, &None);
     assert!(vault_client.get_refund(&payment_ref).is_some());
 }
 
@@ -543,7 +543,7 @@ fn test_policy_comparisons_are_strict() {
     let (payment_ref, buyer) = deposit_and_buyer(&env, &vault_client, &merchant);
     // 250 is not < 250.
     assert_eq!(
-        vault_client.try_refund(&payment_ref, &buyer, &100_000, &0, &100_000),
+        vault_client.try_refund(&payment_ref, &buyer, &100_000, &0, &100_000, &None),
         Err(Ok(Error::OraclePolicyDenied))
     );
 }
@@ -560,7 +560,7 @@ fn test_no_policy_means_no_gating() {
     set_feed_price(&env, &oracle, &feed_id, &1);
 
     let (payment_ref, buyer) = deposit_and_buyer(&env, &vault_client, &merchant);
-    vault_client.refund(&payment_ref, &buyer, &100_000, &0, &100_000);
+    vault_client.refund(&payment_ref, &buyer, &100_000, &0, &100_000, &None);
     assert!(vault_client.get_refund(&payment_ref).is_some());
 }
 
@@ -580,7 +580,7 @@ fn test_policy_without_oracles_fails_closed() {
 
     let (payment_ref, buyer) = deposit_and_buyer(&env, &vault_client, &merchant);
     assert_eq!(
-        vault_client.try_refund(&payment_ref, &buyer, &100_000, &0, &100_000),
+        vault_client.try_refund(&payment_ref, &buyer, &100_000, &0, &100_000, &None),
         Err(Ok(Error::NoOraclesConfigured))
     );
 }
@@ -606,7 +606,7 @@ fn test_policy_with_all_stale_oracles_fails_closed() {
 
     let (payment_ref, buyer) = deposit_and_buyer(&env, &vault_client, &merchant);
     assert_eq!(
-        vault_client.try_refund(&payment_ref, &buyer, &100_000, &0, &100_000),
+        vault_client.try_refund(&payment_ref, &buyer, &100_000, &0, &100_000, &None),
         Err(Ok(Error::StaleOracleData))
     );
 }
@@ -630,12 +630,12 @@ fn test_clearing_policy_disables_gating() {
 
     let (payment_ref, buyer) = deposit_and_buyer(&env, &vault_client, &merchant);
     assert_eq!(
-        vault_client.try_refund(&payment_ref, &buyer, &100_000, &0, &100_000),
+        vault_client.try_refund(&payment_ref, &buyer, &100_000, &0, &100_000, &None),
         Err(Ok(Error::OraclePolicyDenied))
     );
 
     vault_client.clear_oracle_policy();
-    vault_client.refund(&payment_ref, &buyer, &100_000, &0, &100_000);
+    vault_client.refund(&payment_ref, &buyer, &100_000, &0, &100_000, &None);
     assert!(vault_client.get_refund(&payment_ref).is_some());
 }
 
@@ -668,6 +668,7 @@ fn test_process_batch_respects_oracle_policy() {
         amount: 100_000,
         paid_at_ledger: 0,
         payment_amount: 100_000,
+        vdf_proof: None,
     };
     let p2 = RefundParam {
         payment_ref: BytesN::from_array(&env, &[0x22u8; 32]),
@@ -675,6 +676,7 @@ fn test_process_batch_respects_oracle_policy() {
         amount: 200_000,
         paid_at_ledger: 0,
         payment_amount: 200_000,
+        vdf_proof: None,
     };
     let batch = vec![&env, p1.clone(), p2.clone()];
 

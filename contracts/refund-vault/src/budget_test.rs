@@ -12,28 +12,36 @@
 //! The contract must be compiled to WASM first:
 //! `cargo build -p refund-vault --target wasm32v1-none --release`
 
+// The crate is `#![no_std]`, so `std` is not automatically in scope even in
+// unit tests. The `budget_cpu_lt` expansion references `std::env::var`,
+// `std::fs::read_to_string`, `String`, `format!` and `.to_string()`, and this
+// file's own helper uses `std::fs`/`std::vec::Vec`; bring `std` in explicitly.
+extern crate std;
+use std::format;
+use std::string::{String, ToString};
+
 use super::*;
 use budget_macros::budget_cpu_lt;
 use soroban_sdk::{
-    testutils::Address as _,
-    token::StellarAssetClient,
-    Address, BytesN, Env,
+    testutils::Address as _, token::StellarAssetClient, Address, Bytes, BytesN, Env,
 };
 
 const FLOAT: i128 = 1_000_000;
 
-fn load_wasm(path: &str) -> std::vec::Vec<u8> {
-    std::fs::read(path).expect(
+fn load_wasm(env: &Env, path: &str) -> Bytes {
+    let buf = std::fs::read(path).expect(
         "refund-vault wasm not found; run `cargo build -p refund-vault \
          --target wasm32v1-none --release` before the budget tests",
-    )
+    );
+    Bytes::from_slice(env, &buf)
 }
 
 /// Deploys the real `refund_vault` WASM, mints a test token, and initializes the
 /// vault so `deposit` / `refund` behave exactly as they do on-chain.
 fn setup(env: &Env, window: u32) -> (RefundVaultClient<'static>, Address, Address) {
-    let wasm = load_wasm("../../target/wasm32v1-none/release/refund_vault.wasm");
-    let id = env.register_contract_wasm(None, &wasm);
+    let wasm = load_wasm(env, "../../target/wasm32v1-none/release/refund_vault.wasm");
+    #[allow(deprecated)]
+    let id = env.register_contract_wasm(None, wasm);
     let client = RefundVaultClient::new(env, &id);
     env.mock_all_auths();
     let merchant = Address::generate(env);
@@ -63,5 +71,5 @@ fn budget_refund() {
     let payment_ref = BytesN::from_array(&env, &[7u8; 32]);
     let buyer = Address::generate(&env);
     env.cost_estimate().budget().reset_unlimited();
-    client.refund(&payment_ref, &buyer, &120_000, &0, &120_000);
+    client.refund(&payment_ref, &buyer, &120_000, &0, &120_000, &None);
 }

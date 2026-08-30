@@ -179,7 +179,11 @@ jobs:
 
       # --- Build every contract to WASM (needed by the Tier A macro suite) ---
       - name: Wasm build
-        run: cargo build --target wasm32v1-none --release
+        # Exclude `testutils`: it is a std crate (no `#![no_std]`) and its
+        # soroban-sdk `testutils` feature is not supported on wasm, so it
+        # cannot compile for wasm32v1-none (same rationale as the build-wasm
+        # job). Only the contract crates are needed for the Tier A macros.
+        run: cargo build --locked --workspace --exclude testutils --target wasm32v1-none --release
 
       # --- WASM size ceiling (committed baseline + tolerance) ---
       - name: Enforce WASM size budget

@@ -217,13 +217,13 @@ impl Model {
 const HEADROOM_PERCENT: u64 = 15;
 
 /// Cost baselines for `RefundVault::refund`
-/// Measured via `env.cost_estimate().budget().cpu_instruction_cost()` and `env.cost_estimate().budget().memory_bytes_cost()` on 2026-08-28.
-/// Re-baselined after the partial-refund, TTL-guard, reentrancy-guard and
-/// oracle-policy additions grew the `refund` path (see `docs/RELEASING.md`
-/// re-baselining procedure; measured with the oracle policy *unset* so the
-/// value reflects the common path).
-const REFUND_BASELINE_CPU: u64 = 477_714;
-const REFUND_BASELINE_MEM: u64 = 131_994;
+/// Measured via `env.cost_estimate().budget().cpu_instruction_cost()` and `env.cost_estimate().budget().memory_bytes_cost()` on 2026-08-30.
+/// Re-baselined after the partial-refund, TTL-guard, reentrancy-guard,
+/// oracle-policy and commit-reveal additions grew the `refund` path (see
+/// `docs/RELEASING.md` re-baselining procedure; measured with the oracle
+/// policy *unset* but after the commit-reveal lookup hooked into `claim_single`).
+const REFUND_BASELINE_CPU: u64 = 532_622;
+const REFUND_BASELINE_MEM: u64 = 163_557;
 
 #[test]
 fn test_refund_resource_cost_budget() {
@@ -776,7 +776,7 @@ proptest! {
             BytesN::from_array(&env, &[0u8; 32]);
         let buyer = Address::generate(&env);
         let res = client.try_refund(
-            &payment_ref, &buyer, &amount, &0,
+            &payment_ref, &buyer, &amount, &0, &amount, &None,
         );
 
         if amount <= 0 {
@@ -862,15 +862,11 @@ proptest! {
                 VaultOp::Deposit(amount) => {
                     if token_client.balance(&merchant)
                         >= amount
-                    {
-                        if client
-                            .try_deposit(
-                                &merchant, &amount,
-                            )
+                        && client
+                            .try_deposit(&merchant, &amount)
                             .is_ok()
-                        {
-                            total_deposits += amount;
-                        }
+                    {
+                        total_deposits += amount;
                     }
                 }
                 VaultOp::Refund(amount) => {
@@ -890,6 +886,8 @@ proptest! {
                             &buyer,
                             &amount,
                             &0,
+                            &amount,
+                            &None,
                         )
                         .is_ok()
                     {
