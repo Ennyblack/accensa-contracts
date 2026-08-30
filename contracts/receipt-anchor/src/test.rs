@@ -452,6 +452,8 @@ fn test_shared_vectors_cover_required_edge_cases() {
     // shared fixture, the cross-implementation proof-of-parity is no longer
     // proving what it claims to. Names are matched by substring so the suite
     // keeps working as vectors are renamed.
+    extern crate std;
+    let names: std::vec::Vec<&str> = vectors::VECTORS.iter().map(|v| v.name).collect();
     let has = |needle: &str| {
         assert!(
             vectors::VECTORS.iter().any(|v| v.name.contains(needle)),

@@ -253,7 +253,7 @@ dependencies = [
 [[package]]
 name = "budget-macros"
 version = "0.1.0"
-source = "git+https://github.com/Tollcraft/soroban-budget-assert.git?branch=main#36acb41923386e1db8c8febe779ce7d35fbe41a2"
+source = "git+https://github.com/Tollcraft/soroban-budget-assert.git?branch=main#9bbd40e07e82464e03ca93d27388c1a307a193fe"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -800,6 +800,14 @@ dependencies = [
  "cfg-if",
  "libc",
  "r-efi 6.0.0",
+]
+
+[[package]]
+name = "governance"
+version = "0.1.0"
+dependencies = [
+ "receipt-anchor",
+ "soroban-sdk",
 ]
 
 [[package]]
