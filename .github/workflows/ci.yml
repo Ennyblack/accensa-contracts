@@ -156,9 +156,10 @@ jobs:
       SOROBAN_COST_LINTER_TAG: v0.1.1
       SOROBAN_COST_LINTER_NIGHTLY: nightly-2026-04-16
       DYLINT_VERSION: 6.0.1
-      # soroban-budget-assert is distributed from git (not crates.io). Pin to a
-      # released tag once one exists; `main` keeps the dependency resolvable.
-      SOROBAN_BUDGET_ASSERT_REF: main
+      # soroban-budget-assert is distributed from git (not crates.io). Pin to
+      # the released tag: upstream `main` is not guaranteed to compile (it can
+      # carry in-progress work, e.g. #592 broke cargo-budget-report's main.rs).
+      SOROBAN_BUDGET_ASSERT_REF: v0.1.0
       # Funded testnet identity for the Tier B network-simulated report. Empty in
       # forks / untrusted runs, so the network step is skipped there.
       STELLAR_TESTNET_SECRET: ${{ secrets.STELLAR_TESTNET_SECRET }}
@@ -241,7 +242,7 @@ jobs:
       - name: Install cargo-budget-report (pinned)
         run: |
           cargo install --git https://github.com/Tollcraft/soroban-budget-assert.git \
-            --branch "$SOROBAN_BUDGET_ASSERT_REF" --locked cargo-budget-report
+            --tag "$SOROBAN_BUDGET_ASSERT_REF" --locked cargo-budget-report
       - name: Install stellar-cli (Tier B only)
         # `cargo budget-report` simulates against testnet via the stellar CLI.
         if: ${{ env.STELLAR_TESTNET_SECRET != '' }}
