@@ -1953,3 +1953,9 @@ mod token_agnostic_tests;
 #[cfg(test)]
 mod vdf_test;
 mod yield_tests;
+
+// Tier A soroban-budget-assert gates. Compiled only when the `budget-assert`
+// feature is enabled (the budget CI job), so the normal test/clippy runs stay
+// free of the prebuilt-WASM requirement and the `budget_macros` dev-dependency.
+#[cfg(all(test, feature = "budget-assert"))]
+mod budget_test;
