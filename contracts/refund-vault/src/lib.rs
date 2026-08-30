@@ -1,4 +1,4 @@
-#![no_std]
+use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, Symbol, token};
 
 use accensa_common::Error;
 use soroban_sdk::{
@@ -808,21 +808,11 @@ const INITIAL_STORAGE_VERSION: u32 = 1;
 
 #[contractimpl]
 impl RefundVault {
-    pub fn initialize(
-        env: Env,
-        merchant: Address,
-        token: Address,
-        refund_window_ledgers: u32,
-    ) -> Result<(), Error> {
-        if env.storage().instance().has(&DataKey::Admin) {
-            return Err(Error::AlreadyInitialized);
-        }
-        if refund_window_ledgers < MIN_REFUND_WINDOW {
-            return Err(Error::InvalidWindow);
-        }
-
-        merchant.require_auth();
-
+    /// Initializes the vault.
+    /// # Errors
+    /// - `AlreadyInitialized`: If already set.
+    pub fn initialize(env: Env, merchant: Address, token: Address, refund_window: u32) -> Result<(), Symbol> {
+        if env.storage().instance().has(&DataKey::Admin) { return Err(Symbol::new(&env, "AlreadyInitialized")); }
         env.storage().instance().set(&DataKey::Admin, &merchant);
         env.storage().instance().set(&DataKey::Token, &token);
         env.storage()
@@ -2158,14 +2148,9 @@ impl RefundVault {
         Ok(())
     }
 
-    pub fn unpause(env: Env) -> Result<(), Error> {
-        let merchant: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Admin)
-            .ok_or(Error::NotInitialized)?;
-        merchant.require_auth();
-
+    pub fn unpause(env: Env) -> Result<(), Symbol> {
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).ok_or(Symbol::new(&env, "NotInitialized"))?;
+        admin.require_auth();
         env.storage().instance().set(&DataKey::IsPaused, &false);
 
         UnpauseEvent {

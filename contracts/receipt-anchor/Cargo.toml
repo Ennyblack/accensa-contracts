@@ -9,7 +9,6 @@ description = "Merkle batch anchoring for x402 receipts on Stellar"
 [lints]
 workspace = true
 
-
 [lib]
 crate-type = ["cdylib", "rlib"]
 
