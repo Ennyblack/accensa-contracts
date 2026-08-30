@@ -1915,7 +1915,6 @@ fn test_shared_refund_vectors_include_live_testnet_refund() {
 #[test]
 fn test_refund_to_contract_address_fails_self_transfer() {
     use soroban_sdk::testutils::Events;
-
     let (env, client, merchant, _token) = setup(100);
     client.deposit(&merchant, &500_000);
 
@@ -1982,7 +1981,6 @@ fn test_process_batch_item_to_contract_address_skipped() {
 #[test]
 fn test_withdraw_to_contract_address_fails_self_transfer() {
     use soroban_sdk::testutils::Events;
-
     let (env, client, merchant, _token) = setup(100);
     client.deposit(&merchant, &500_000);
 

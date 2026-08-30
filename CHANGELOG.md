@@ -56,7 +56,6 @@ breaking changes bump the **minor** version, and they are called out as such.
   (deadline, ceiling, float, and the configured fee), publishing a
   `RefundEvent` per applied claim. Non-atomic by design — callers that require
   all-or-nothing semantics should use `claim_batch` instead.
-
 - **Batch refunds for `RefundVault`**: `claim_batch(claims)` refunds multiple
   claims in a single transaction, each processed with exactly the same logic,
   checks, fees and events as `refund`, sharing one merchant authorization and
@@ -73,7 +72,6 @@ breaking changes bump the **minor** version, and they are called out as such.
   endpoint are unchanged (the shared claim path is extracted verbatim), and gas
   is pinned by a budget test asserting a ten-claim batch stays well under the
   default CPU and memory limits and scales near-linearly with a single claim.
-
 - **Refund fees for `RefundVault`**: the merchant can configure a fee deducted
   from every successful refund — `set_fee_bps(bps)` fixes the rate (basis
   points, up to 10_000) and `set_fee_recipient(recipient)` the collector
@@ -88,7 +86,6 @@ breaking changes bump the **minor** version, and they are called out as such.
   `get_fee_recipient()` getters expose the configuration, and the
   `RefundEvent` data map gains a `fee` field (append-only, see
   `docs/EVENTS.md`).
-
 - **Refund expiration deadline for `RefundVault`**: the refund policy now
   carries a wall-clock deadline (Unix timestamp) alongside the ledger-based
   window — `propose_policy(ledgers, deadline)` configures it (subject to the
