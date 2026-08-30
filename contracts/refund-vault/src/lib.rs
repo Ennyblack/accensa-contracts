@@ -174,6 +174,8 @@ pub struct RefundEvent {
     pub cumulative_refunded: i128,
     pub recipient: Address,
     pub ledger: u32,
+    /// Monotonic nonce at the time of this operation (issue #136).
+    pub nonce: u64,
 }
 
 /// Emitted when the admin changes the refund fee configuration (the basis-point
@@ -198,6 +200,8 @@ pub struct DepositEvent {
     #[topic]
     pub from: Address,
     pub amount: i128,
+    /// Monotonic nonce at the time of this operation (issue #136).
+    pub nonce: u64,
 }
 
 /// Emitted when the merchant pauses the vault, halting deposits, refunds and withdrawals.
@@ -228,6 +232,8 @@ pub struct WithdrawEvent {
     #[topic]
     pub to: Address,
     pub amount: i128,
+    /// Monotonic nonce at the time of this operation (issue #136).
+    pub nonce: u64,
 }
 
 #[contractevent]
@@ -254,6 +260,8 @@ pub struct YieldDeployedEvent {
     #[topic]
     pub strategy: Address,
     pub amount: i128,
+    /// Monotonic nonce at the time of this operation (issue #136).
+    pub nonce: u64,
 }
 
 #[contractevent]
@@ -263,12 +271,16 @@ pub struct YieldWithdrawnEvent {
     pub strategy: Address,
     pub principal: i128,
     pub yield_amount: i128,
+    /// Monotonic nonce at the time of this operation (issue #136).
+    pub nonce: u64,
 }
 
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct YieldHarvestedEvent {
     pub amount: i128,
+    /// Monotonic nonce at the time of this operation (issue #136).
+    pub nonce: u64,
 }
 
 #[contractevent]
@@ -396,6 +408,15 @@ fn release_reentrancy_lock(env: &Env) {
     env.storage()
         .instance()
         .set(&DataKey::ReentrancyLock, &false);
+}
+
+/// Increment the monotonic nonce and return its *previous* value (issue #136).
+fn increment_nonce(env: &Env) -> u64 {
+    let current: u64 = env.storage().instance().get(&DataKey::Nonce).unwrap_or(0);
+    env.storage()
+        .instance()
+        .set(&DataKey::Nonce, &(current + 1));
+    current
 }
 
 /// How many ledgers to extend a payment's `RefundV2` record's TTL by, so the
@@ -643,6 +664,8 @@ fn claim_single(env: &Env, claim: &RefundClaim) -> Result<(), Error> {
         extend_to,
     );
 
+    let nonce = increment_nonce(env);
+
     RefundEvent {
         payment_ref: claim.payment_ref.clone(),
         amount: claim.amount,
@@ -650,6 +673,7 @@ fn claim_single(env: &Env, claim: &RefundClaim) -> Result<(), Error> {
         cumulative_refunded,
         recipient: record.recipient,
         ledger: record.ledger,
+        nonce,
     }
     .publish(env);
 
@@ -686,10 +710,32 @@ impl RefundVault {
             .instance()
             .set(&DataKey::StorageVersion, &INITIAL_STORAGE_VERSION);
 
+        // Issue #136: domain separator and nonce.
+        let contract_addr = env.current_contract_address();
+        let addr_str = contract_addr.to_string();
+        let separator = env.crypto().sha256(&soroban_sdk::Bytes::from(addr_str));
+        env.storage()
+            .instance()
+            .set(&DataKey::DomainSeparator, &separator);
+        env.storage().instance().set(&DataKey::Nonce, &0u64);
+
         env.storage()
             .instance()
             .extend_ttl(TTL_THRESHOLD, TTL_EXTEND);
         Ok(())
+    }
+
+    /// Domain separator for this vault instance (issue #136).
+    pub fn get_domain_separator(env: Env) -> BytesN<32> {
+        env.storage()
+            .instance()
+            .get(&DataKey::DomainSeparator)
+            .unwrap()
+    }
+
+    /// Current monotonic nonce (issue #136).
+    pub fn get_nonce(env: Env) -> u64 {
+        env.storage().instance().get(&DataKey::Nonce).unwrap_or(0)
     }
 
     pub fn deposit(env: Env, from: Address, amount: i128) -> Result<(), Error> {
@@ -723,9 +769,12 @@ impl RefundVault {
         let client = token::Client::new(&env, &token);
         client.transfer(&from, env.current_contract_address(), &amount);
 
+        let nonce = increment_nonce(&env);
+
         DepositEvent {
             from: from.clone(),
             amount,
+            nonce,
         }
         .publish(&env);
 
@@ -1019,9 +1068,12 @@ impl RefundVault {
 
         token_client.transfer(&env.current_contract_address(), &to, &amount);
 
+        let nonce = increment_nonce(&env);
+
         WithdrawEvent {
             to: to.clone(),
             amount,
+            nonce,
         }
         .publish(&env);
 
@@ -1544,9 +1596,12 @@ impl RefundVault {
             .set(&DataKey::DeployedPrincipal, &(deployed + amount));
         persist_yield_ttl(&env, &DataKey::DeployedPrincipal);
 
+        let nonce = increment_nonce(&env);
+
         YieldDeployedEvent {
             strategy: strategy.clone(),
             amount,
+            nonce,
         }
         .publish(&env);
 
@@ -1618,10 +1673,13 @@ impl RefundVault {
         persist_yield_ttl(&env, &DataKey::DeployedPrincipal);
         persist_yield_ttl(&env, &DataKey::HarvestedYield);
 
+        let nonce = increment_nonce(&env);
+
         YieldWithdrawnEvent {
             strategy,
             principal: principal_returned,
             yield_amount: yield_returned,
+            nonce,
         }
         .publish(&env);
 
@@ -1676,8 +1734,11 @@ impl RefundVault {
             .set(&DataKey::HarvestedYield, &(harvested + yield_amount));
         persist_yield_ttl(&env, &DataKey::HarvestedYield);
 
+        let nonce = increment_nonce(&env);
+
         YieldHarvestedEvent {
             amount: yield_amount,
+            nonce,
         }
         .publish(&env);
 
