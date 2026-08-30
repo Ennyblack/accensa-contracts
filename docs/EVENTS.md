@@ -106,26 +106,25 @@ Emitted when the merchant changes the refund window.
 
 Both values are carried so a reader can tell whether a refund rejected at a given ledger was rejected under the old rule or the new one.
 
-### 9. `PolicyProposedEvent`
-Emitted when the merchant proposes a new refund policy (window and deadline). The change is not applied until the matching `PolicyExecutedEvent`.
+### 9. `OraclePolicySetEvent`
+Emitted when the merchant installs (or replaces) the dynamic oracle policy
+that gates refunds.
 
-- **Topics**: `("policy_proposed_event", window: u32)`
+- **Topics**: `("oracle_policy_set_event", feed_id: BytesN<32>)`
 - **Data Map**:
-  - `deadline` (`u64`): The wall-clock deadline (Unix timestamp) after which refund claims are rejected; `0` disables the deadline.
-  - `proposed_at_ledger` (`u32`): The ledger sequence when the proposal was made.
-  - `execute_after_ledger` (`u32`): The earliest ledger at which `execute_policy` may succeed (proposal + timelock).
+  - `threshold` (`i128`): The median value (in the feed's scale) at which the condition flips.
+  - `refund_when_below` (`bool`): `true` = refunds allowed while the median is strictly below the threshold; `false` = allowed while strictly above.
+  - `max_staleness_ledgers` (`u32`): Maximum allowed age of a feed value; `0` = never stale.
 
-### 10. `PolicyExecutedEvent`
-Emitted when the merchant executes a pending policy change after the timelock.
+The data map carries the full condition, so an indexer can reconstruct the
+policy in force from the event log alone.
 
-- **Topics**: `("policy_executed_event", window: u32)`
-- **Data Map**:
-  - `deadline` (`u64`): The wall-clock deadline (Unix timestamp) now in force; `0` means no deadline.
+### 10. `OraclePolicyClearedEvent`
+Emitted when the merchant removes the dynamic oracle policy, restoring purely
+time-window-based refunds.
 
-### 11. `FeeConfigUpdatedEvent`
-Emitted when the merchant changes the refund fee configuration (the basis-point rate or the recipient address). Each emission carries the **full effective configuration** — including the current value of the other field — keyed by the field that changed.
+- **Topics**: `("oracle_policy_cleared_event", feed_id: BytesN<32>)`
+- **Data Map**: *(empty)*
 
-- **Topics**: `("fee_config_updated_event", field: Symbol)` where `field` is `"fee_bps"` (rate changed) or `"fee_recipient"` (recipient changed).
-- **Data Map**:
-  - `fee_bps` (`u32`): The fee rate in basis points in force after the change; `0` means no fee.
-  - `fee_recipient` (`Address`): The effective fee recipient, resolved via the merchant fallback when none is configured.
+The `feed_id` is the feed of the policy that was in force, captured before it
+was removed, so a reader can correlate the clear with the preceding set event.
