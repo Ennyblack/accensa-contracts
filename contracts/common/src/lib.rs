@@ -100,4 +100,19 @@ pub enum Error {
     /// A VDF proof was supplied for a claim against a policy that has no VDF
     /// delay configured.
     VdfNotConfigured = 304,
+    /// A reveal was attempted without a matching, pending commit
+    /// (commit-reveal, issue #128).
+    NoCommit = 305,
+    /// A commit was submitted for a commitment hash that already has a pending
+    /// commitment (commit-reveal, issue #128).
+    CommitAlreadyExists = 306,
+    /// The plaintext revealed does not hash to the committed value
+    /// (commit-reveal, issue #128).
+    CommitMismatch = 307,
+    /// A reveal was attempted before the minimum commit-reveal ledger delay
+    /// elapsed (commit-reveal, issue #128).
+    CommitDelayNotElapsed = 308,
+    /// A reveal was attempted under a different operation than the one the
+    /// commitment was originally bound to (commit-reveal, issue #128).
+    CommitOperationMismatch = 309,
 }

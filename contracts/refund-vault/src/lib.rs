@@ -95,6 +95,13 @@ pub enum DataKey {
     ReentrancyLock,
     /// Monotonic storage-layout version. Missing on legacy deployments (v1).
     StorageVersion,
+    /// A pending commit-reveal commitment (issue #128). Keyed by the
+    /// SHA-256 commitment hash the merchant supplied; the value records who
+    /// committed, which operation it is bound to, and the ledger it was
+    /// committed at. Stored in Persistent storage (TTL-managed) because a
+    /// commitment must survive until its reveal, which is guaranteed to be at
+    /// least `COMMIT_MIN_DELAY_LEDGERS` ledgers later.
+    Commit(BytesN<32>),
 }
 
 #[contracttype]
@@ -124,6 +131,23 @@ pub struct PolicyProposal {
     /// prove. `0` (the default) means no VDF proof is required.
     pub vdf_delay: u32,
     pub proposed_at_ledger: u32,
+}
+
+/// A pending commit-reveal commitment (issue #128). Recorded by
+/// [`RefundVault::commit`] under the commitment hash and consumed by
+/// [`RefundVault::reveal`].
+///
+/// `operation` binds the commitment to a specific class of sensitive action
+/// (e.g. `refund` or `policy`) so a commitment made for one action cannot be
+/// revealed as another. `committed_at_ledger` feeds the minimum-delay check:
+/// the reveal is only accepted once `COMMIT_MIN_DELAY_LEDGERS` ledgers have
+/// elapsed since the commit.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CommitRecord {
+    pub caller: Address,
+    pub operation: Symbol,
+    pub committed_at_ledger: u32,
 }
 
 /// Parameters for a single refund claim, mirroring the arguments of
@@ -339,6 +363,37 @@ pub struct OraclePolicyClearedEvent {
     pub feed_id: BytesN<32>,
 }
 
+/// Emitted when the merchant commits to a hashed intended action
+/// (commit-reveal, issue #128).
+///
+/// Topics: `("commit_event", operation, commitment_hash)`. The data map
+/// carries the ledger the commitment becomes eligible for reveal at.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CommitEvent {
+    #[topic]
+    pub operation: Symbol,
+    #[topic]
+    pub commitment_hash: BytesN<32>,
+    /// The first ledger at which this commitment may be revealed
+    /// (`committed_at_ledger + COMMIT_MIN_DELAY_LEDGERS`).
+    pub reveal_at_ledger: u32,
+}
+
+/// Emitted when a pending commitment is revealed (commit-reveal, issue #128).
+///
+/// Topics: `("commit_revealed_event", operation, commitment_hash)`. The data
+/// map carries the ledger at which the reveal was accepted.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CommitRevealedEvent {
+    #[topic]
+    pub operation: Symbol,
+    #[topic]
+    pub commitment_hash: BytesN<32>,
+    pub ledger: u32,
+}
+
 pub mod oracle;
 
 /// Interface for external yield-generating strategies (e.g., Soroban lending protocols).
@@ -378,6 +433,15 @@ const TTL_EXTEND: u32 = 518_400;
 const TTL_THRESHOLD: u32 = 100;
 /// Timelock delay for policy changes in ledgers (~24 hours at 5s/ledger).
 const POLICY_TIMELOCK: u32 = 17_280;
+
+/// Minimum number of ledgers that must elapse between a commit and its
+/// matching reveal (issue #128). By the time the merchant's reveal lands,
+/// a would-be front-runner who observed the commit in the mempool has had a
+/// fixed window in which to react — but the plaintext is never visible until
+/// the reveal itself, so the attacker cannot reproduce the intended action to
+/// submit it first. 7 ledgers (~35s at 5s/ledger) is long enough to make the
+/// reordering useless while keeping the UX snappy.
+const COMMIT_MIN_DELAY_LEDGERS: u32 = 7;
 
 /// Reentrancy guard for entry points that make an external call (a token
 /// transfer or a yield-strategy invocation).
@@ -1212,6 +1276,159 @@ impl RefundVault {
         POLICY_TIMELOCK
     }
 
+    /// Returns the minimum commit-reveal delay in ledgers (read-only).
+    pub fn get_commit_min_delay() -> u32 {
+        COMMIT_MIN_DELAY_LEDGERS
+    }
+
+    /// Returns the pending commit-reveal commitment recorded under
+    /// `commitment_hash`, if any (read-only).
+    pub fn get_commit(env: Env, commitment_hash: BytesN<32>) -> Option<CommitRecord> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Commit(commitment_hash))
+    }
+
+    // ── Commit-reveal (issue #128) ────────────────────────────────────────
+
+    /// Commit to a hashed intended sensitive action (a refund claim or a
+    /// policy update) before its plaintext is revealed.
+    ///
+    /// Front-running protection: some vault operations (`refund`,
+    /// `claim_batch`, `propose_policy`) are visible in the mempool, so a
+    /// validator or bot could observe the merchant's transaction and submit a
+    /// competing one with a higher fee, reordering the pool. A commit-reveal
+    /// scheme breaks that: the merchant first submits only `commitment_hash`
+    /// (SHA-256 of the plaintext action) under a symbolic `operation`, waits
+    /// `COMMIT_MIN_DELAY_LEDGERS` ledgers, then reveals the plaintext. Until
+    /// the reveal, no one — a would-be front-runner included — can learn the
+    /// intended action from the commitment, and a bare commit (no reveal) has
+    /// no effect on the vault.
+    ///
+    /// Only the merchant may commit. A commitment is bound to `operation` and
+    /// to the committing merchant, is single-use, and cannot be created twice
+    /// under the same `commitment_hash` while pending (`CommitAlreadyExists`).
+    pub fn commit(
+        env: Env,
+        operation: Symbol,
+        commitment_hash: BytesN<32>,
+    ) -> Result<(), Error> {
+        let merchant: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(Error::NotInitialized)?;
+        merchant.require_auth();
+
+        // A commitment hash is unique per pending intent; a duplicate means a
+        // previously-committed action is still awaiting its reveal.
+        if env
+            .storage()
+            .persistent()
+            .has(&DataKey::Commit(commitment_hash.clone()))
+        {
+            return Err(Error::CommitAlreadyExists);
+        }
+
+        let committed_at_ledger = env.ledger().sequence();
+        let record = CommitRecord {
+            caller: merchant,
+            operation: operation.clone(),
+            committed_at_ledger,
+        };
+        env.storage()
+            .persistent()
+            .set(&DataKey::Commit(commitment_hash.clone()), &record);
+        // A commitment must live at least until its reveal, which is
+        // guaranteed to be at least COMMIT_MIN_DELAY_LEDGERS later. Keep it
+        // live with the standard extension budget so nothing expires mid-flow.
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey::Commit(commitment_hash.clone()), TTL_EXTEND, TTL_THRESHOLD);
+        env.storage()
+            .instance()
+            .extend_ttl(TTL_THRESHOLD, TTL_EXTEND);
+
+        CommitEvent {
+            operation,
+            commitment_hash,
+            reveal_at_ledger: committed_at_ledger + COMMIT_MIN_DELAY_LEDGERS,
+        }
+        .publish(&env);
+
+        Ok(())
+    }
+
+    /// Reveal the plaintext behind a previously-committed action, executing
+    /// the front-running-protected step.
+    ///
+    /// Must be called by the same merchant who committed, with the same
+    /// `operation`, at least `COMMIT_MIN_DELAY_LEDGERS` ledgers after the
+    /// commit. `plaintext` is the data that hashes to the committed
+    /// `commitment_hash`; the contract re-derives the hash and rejects a
+    /// mismatch with [`Error::CommitMismatch`]. On success the commitment is
+    /// consumed (single-use) and `CommitRevealedEvent` is emitted, so the
+    /// revealed (now-public) action is bound to this merchant in a
+    /// deterministic, order-stable way.
+    ///
+    /// The caller is responsible for authorising the actual action; this entry
+    /// point only guards *when* and *by whom* the plaintext may be surfaced.
+    pub fn reveal(
+        env: Env,
+        operation: Symbol,
+        commitment_hash: BytesN<32>,
+        plaintext: Bytes,
+    ) -> Result<(), Error> {
+        let merchant: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(Error::NotInitialized)?;
+        merchant.require_auth();
+
+        let record: CommitRecord = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Commit(commitment_hash.clone()))
+            .ok_or(Error::NoCommit)?;
+        if record.caller != merchant {
+            return Err(Error::Unauthorized);
+        }
+        if record.operation != operation {
+            return Err(Error::CommitOperationMismatch);
+        }
+
+        // Re-derive the commitment from the revealed plaintext and verify it
+        // matches the hash committed earlier.
+        let digest = env.crypto().sha256(&plaintext);
+        if digest != commitment_hash {
+            return Err(Error::CommitMismatch);
+        }
+
+        // Enforce the minimum ledger delay between commit and reveal.
+        let current_ledger = env.ledger().sequence();
+        if current_ledger < record.committed_at_ledger + COMMIT_MIN_DELAY_LEDGERS {
+            return Err(Error::CommitDelayNotElapsed);
+        }
+
+        // Consume the commitment: single-use.
+        env.storage()
+            .persistent()
+            .remove(&DataKey::Commit(commitment_hash.clone()));
+        env.storage()
+            .instance()
+            .extend_ttl(TTL_THRESHOLD, TTL_EXTEND);
+
+        CommitRevealedEvent {
+            operation,
+            commitment_hash,
+            ledger: current_ledger,
+        }
+        .publish(&env);
+
+        Ok(())
+    }
+
     // ── Oracle aggregation ────────────────────────────────────────────────
 
     /// Whitelist an oracle contract implementing the [`oracle::Oracle`]
@@ -1953,6 +2170,11 @@ mod token_agnostic_tests;
 #[cfg(test)]
 mod vdf_test;
 mod yield_tests;
+
+/// Security audit tests for the commit-reveal scheme (issue #128): simulate
+/// and block front-running attempts against commit/reveal.
+#[cfg(test)]
+mod commit_reveal_tests;
 
 // Tier A soroban-budget-assert gates. Compiled only when the `budget-assert`
 // feature is enabled (the budget CI job), so the normal test/clippy runs stay
